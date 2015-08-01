@@ -614,7 +614,6 @@ l3portd_reconfigure(void)
     }
     l3portd_add_del_vrf();
     l3portd_add_del_ports();
-    l3portd_dump();
 
     idl_seqno = new_idl_seqno; /* This has to be done after all changes are done */
     return;
