@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <net/if.h>
 #include <linux/if_addr.h>
+#include <unistd.h>
 
 #include "hash.h"
 #include "l3portd.h"
@@ -76,11 +77,11 @@ l3portd_init_ipcfg(void)
     nl_ip_sock = l3portd_netlink_socket_open();
 }
 
+/* write to /proc entries to enable/disable Linux ip forwarding(routing) */
 void
 l3portd_config_iprouting(int enable)
 {
     int fd = -1, nbytes = 0;
-    ssize_t ret;
     char buf[16];
     const char *ipv4_path = "/proc/sys/net/ipv4/ip_forward";
     const char *ipv6_path = "/proc/sys/net/ipv6/conf/all/forwarding";
@@ -112,6 +113,7 @@ l3portd_config_iprouting(int enable)
     VLOG_DBG("%s ipv6 forwarding", (enable == 1 ? "Enabled" : "Disabled"));
 }
 
+/* return ipv4/ipv6 prefix and prefix length */
 static int
 l3portd_get_prefix(int family, char *ip_address, void *prefix,
                    unsigned char *prefixlen)
@@ -139,6 +141,8 @@ l3portd_get_prefix(int family, char *ip_address, void *prefix,
 
 /* HALON_TODO - ipv6 secondary address also shows up as primary in 'ip -6 addr show' - fix */
 /* HALON_TODO - unable to delete ipv6 address using netlink - fix */
+
+/* Set IP address on Linux interface using netlink sockets */
 static void
 l3portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
                    int family, bool secondary)
@@ -153,7 +157,7 @@ l3portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
     } req;
     struct in_addr ipv4;
     struct in6_addr ipv6;
-    unsigned char prefixlen, *ipaddr;
+    unsigned char prefixlen, *ipaddr = NULL;
 
     memset (&req, 0, sizeof(req));
 
@@ -191,7 +195,7 @@ l3portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
     buflen = RTA_LENGTH(bytelen);
     if (NLMSG_ALIGN(req.n.nlmsg_len) + RTA_ALIGN(buflen) > sizeof(req)) {
         VLOG_ERR("Message length (%d) exceeded max (%d)",
-                NLMSG_ALIGN(req.n.nlmsg_len) + RTA_ALIGN(buflen), sizeof(req));
+                NLMSG_ALIGN(req.n.nlmsg_len) + RTA_ALIGN(buflen), (int)sizeof(req));
         return;
     }
 
@@ -240,6 +244,9 @@ l3portd_ip4_addr_find(struct port *cfg, const char *address)
     return NULL;
 }
 
+/* Add secondary v6 address in Linux that got added.
+ * Delete secondary v6 addresses from Linux that got deleted.
+ */
 static void
 l3portd_config_secondary_ipv6_addr(struct port *port,
                                        struct ovsrec_port *port_row)
@@ -294,6 +301,9 @@ l3portd_config_secondary_ipv6_addr(struct port *port,
 }
 
 
+/* Add secondary v4 address in Linux that got added in db.
+ * Delete secondary v4 addresses from Linux that got deleted from db.
+ */
 static void
 l3portd_config_secondary_ipv4_addr(struct port *port,
                                    struct ovsrec_port *port_row)
@@ -367,6 +377,7 @@ l3portd_del_ipaddr(struct port *port)
     }
 }
 
+/* Take care of add/delete/modify of v4/v6 address from db */
 void
 l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
 {
