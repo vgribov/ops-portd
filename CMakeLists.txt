@@ -28,6 +28,8 @@ include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}
                      ${OVSCOMMON_INCLUDE_DIRS}
 )
 
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror")
+
 # Source files to build l3portd
 set (SOURCES l3portd.c l3portd_ipcfg.c)
 

@@ -37,7 +37,9 @@
 /* OVSDB Includes */
 #include "config.h"
 #include "command-line.h"
+#include "stream.h"
 #include "daemon.h"
+#include "fatal-signal.h"
 #include "dirs.h"
 #include "poll-loop.h"
 #include "unixctl.h"
@@ -86,6 +88,14 @@ l3portd_chk_for_system_configured(void)
 
 }
 
+/* Register for port table notifications so that:
+ * When port is marked L3 (by attaching to VRF), create an internal VLAN for it.
+ * When port is not L3, delete the internal VLAN associated with it.
+ * When IP address (primary, secondary) are configured on the port,
+ *      configure the IP in Linux kernel interfaces using netlink sockets.
+ * When IP addresses are removed/modified, reflect the same in Linux.
+ * When VRF is added/deleted, enable/disable Linux forwarding (routing).
+ */
 static void
 l3portd_init(const char *remote)
 {
@@ -160,6 +170,7 @@ l3portd_vrf_lookup(const char *name)
     return NULL;
 }
 
+/* delete internal port cache */
 static void
 l3portd_port_destroy(struct port *port)
 {
@@ -195,13 +206,14 @@ l3portd_port_destroy(struct port *port)
     }
 }
 
+/* delete vlan from VLAN table in DB */
 static void
 l3portd_bridge_del_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
 {
     struct ovsrec_vlan **vlans;
     size_t i, n;
 
-    VLOG_DBG("Deleting VLAN %d", vlan->id);
+    VLOG_DBG("Deleting VLAN %d", (int)vlan->id);
     vlans = xmalloc(sizeof *br->vlans * br->n_vlans);
     for (i = n = 0; i < br->n_vlans; i++) {
         if (br->vlans[i] != vlan) {
@@ -218,7 +230,7 @@ l3portd_del_internal_vlan(int internal_vid)
 {
     int i;
     struct ovsrec_vlan *vlan = NULL;
-    struct ovsrec_bridge *br_row = NULL;
+    const struct ovsrec_bridge *br_row = NULL;
     if (internal_vid == -1) {
         return;
     }
@@ -228,13 +240,14 @@ l3portd_del_internal_vlan(int internal_vid)
             for (i = 0; i < br_row->n_vlans; i++) {
                 if (internal_vid == br_row->vlans[i]->id) {
                     vlan = br_row->vlans[i];
-                    l3portd_bridge_del_vlan(br_row, vlan);
+                    l3portd_bridge_del_vlan((struct ovsrec_bridge *)br_row, vlan);
                 }
             }
         }
     }
 }
 
+/* delete vrf from cache */
 static void
 l3portd_vrf_del(struct vrf *vrf)
 {
@@ -256,6 +269,7 @@ l3portd_vrf_del(struct vrf *vrf)
     }
 }
 
+/* add vrf into cache */
 static void
 l3portd_vrf_add(const struct ovsrec_vrf *vrf_row)
 {
@@ -326,7 +340,6 @@ l3portd_collect_wanted_ports(struct vrf *vrf,
 static void
 l3portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
 {
-    struct shash_node *port_node;
     struct port *port, *next;
 
     HMAP_FOR_EACH_SAFE (port, next, port_node, &vrf->ports) {
@@ -340,6 +353,7 @@ l3portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
     }
 }
 
+/* create port in cache */
 static void
 l3portd_port_create(struct vrf *vrf, struct ovsrec_port *port_row)
 {
@@ -462,6 +476,7 @@ l3portd_alloc_internal_vlan(void)
     return ret;
 }
 
+/* add new vlan row into db */
 static void
 l3portd_bridge_insert_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
 {
@@ -478,6 +493,7 @@ l3portd_bridge_insert_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
     free(vlans);
 }
 
+/* create a new internal vlan row to be inserted into db */
 static void
 l3portd_create_vlan_row(int vid, struct ovsrec_port *port_row)
 {
@@ -504,7 +520,7 @@ l3portd_create_vlan_row(int vid, struct ovsrec_port *port_row)
     OVSREC_BRIDGE_FOR_EACH (br_row, idl) {
         if (!strcmp(br_row->name, DEFAULT_BRIDGE_NAME)) {
             VLOG_DBG("Creating VLAN row '%s'", vlan_name);
-            l3portd_bridge_insert_vlan(br_row, vlan);
+            l3portd_bridge_insert_vlan((struct ovsrec_bridge *)br_row, vlan);
         }
     }
 }
@@ -604,6 +620,11 @@ l3portd_add_del_ports(void)
     }
 }
 
+/* Checks to see if:
+ * vrf has been added/deleted.
+ * port has been added/deleted from a vrf.
+ * port has been modified (IP address(es)).
+ */
 static void
 l3portd_reconfigure(void)
 {
