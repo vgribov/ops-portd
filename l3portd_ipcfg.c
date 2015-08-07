@@ -381,8 +381,6 @@ l3portd_del_ipaddr(struct port *port)
 void
 l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
 {
-    const struct ovsdb_idl_column *column;
-
     /*
      * Configure primary network addresses
      */
@@ -439,20 +437,16 @@ l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
     /*
      * Configure secondary network addresses
      */
-    OVSREC_IDL_GET_COLUMN(column, port_row, "ip4_address_secondary");
-    if (column) {
-        if (OVSREC_IDL_IS_COLUMN_MODIFIED(column, idl_seqno) ) {
-            VLOG_DBG("ip4_address_secondary modified");
-            l3portd_config_secondary_ipv4_addr(port, port_row);
-        }
+    if (OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_port_col_ip4_address_secondary,
+                                      idl_seqno) ) {
+        VLOG_DBG("ip4_address_secondary modified");
+        l3portd_config_secondary_ipv4_addr(port, port_row);
     }
 
-    OVSREC_IDL_GET_COLUMN(column, port_row, "ip6_address_secondary");
-    if (column) {
-        if (OVSREC_IDL_IS_COLUMN_MODIFIED(column, idl_seqno) ) {
-            VLOG_INFO("ip6_address_secondary modified");
-            l3portd_config_secondary_ipv6_addr(port, port_row);
-        }
+    if (OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_port_col_ip6_address_secondary,
+                                      idl_seqno) ) {
+        VLOG_INFO("ip6_address_secondary modified");
+        l3portd_config_secondary_ipv6_addr(port, port_row);
     }
 
 }
