@@ -30,6 +30,14 @@
 #define L3PORTD_IPV4_MAX_LEN 32
 #define L3PORTD_IPV6_MAX_LEN 128
 
+#define INET_ADDRSTRLEN     16
+#define INET_PREFIX_SIZE    18
+
+#define INET6_ADDRSTRLEN    46
+#define INET6_PREFIX_SIZE   49
+
+#define CONNECTED_ROUTE_DISTANCE    0
+
 #define NLMSG_TAIL(nmsg) \
         ((struct rtattr *) (((void *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
 
@@ -62,12 +70,26 @@ struct net_address {
     char *address;
 };
 
+/* IPv4 prefix structure. */
+struct prefix_ipv4
+{
+  u_char family;
+  u_char prefixlen;
+  struct in_addr prefix __attribute__ ((aligned (8)));
+};
+
+/* IPv6 prefix structure. */
+struct prefix_ipv6
+{
+  u_char family;
+  u_char prefixlen;
+  struct in6_addr prefix __attribute__ ((aligned (8)));
+};
+
 void l3portd_exit_ipcfg(void);
 void l3portd_init_ipcfg(void);
 void l3portd_config_iprouting(int enable);
 void l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row);
 void l3portd_del_ipaddr(struct port *port);
-
-
 
 #endif /* L3PORTD_H_ */

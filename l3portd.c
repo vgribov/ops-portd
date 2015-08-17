@@ -58,12 +58,12 @@ VLOG_DEFINE_THIS_MODULE(l3portd);
 COVERAGE_DEFINE(l3portd_reconfigure);
 
 unsigned int idl_seqno;
+struct ovsdb_idl *idl;
+struct ovsdb_idl_txn *txn;
+bool commit_txn = false;
 
-static struct ovsdb_idl *idl;
-static struct ovsdb_idl_txn *txn;
 static unixctl_cb_func l3portd_unixctl_dump;
 static int system_configured = false;
-static bool commit_txn = false;
 
 /* All vrfs, indexed by name. */
 static struct hmap all_vrfs = HMAP_INITIALIZER(&all_vrfs);
@@ -143,6 +143,29 @@ l3portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_vlan_col_internal_usage);
     ovsdb_idl_omit_alert(idl, &ovsrec_vlan_col_internal_usage);
 
+    /*
+     * This daemon is also responsible for adding routes for
+     * directly connected subnets.
+     */
+    ovsdb_idl_add_table(idl, &ovsrec_table_nexthop);
+    ovsdb_idl_add_column(idl, &ovsrec_nexthop_col_ports);
+    ovsdb_idl_omit_alert(idl, &ovsrec_nexthop_col_ports);
+
+    ovsdb_idl_add_table(idl, &ovsrec_table_route);
+    ovsdb_idl_add_column(idl, &ovsrec_route_col_prefix);
+    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_prefix);
+    ovsdb_idl_add_column(idl, &ovsrec_route_col_from);
+    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_from);
+    ovsdb_idl_add_column(idl, &ovsrec_route_col_nexthops);
+    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_nexthops);
+    ovsdb_idl_add_column(idl, &ovsrec_route_col_address_family);
+    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_address_family);
+    ovsdb_idl_add_column(idl, &ovsrec_route_col_sub_address_family);
+    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_sub_address_family);
+    ovsdb_idl_add_column(idl, &ovsrec_route_col_distance);
+    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_distance);
+    ovsdb_idl_add_column(idl, &ovsrec_route_col_vrf);
+    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_vrf);
 
     unixctl_command_register("l3portd/dump", "", 0, 0,
                              l3portd_unixctl_dump, NULL);
