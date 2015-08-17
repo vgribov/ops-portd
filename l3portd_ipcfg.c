@@ -119,28 +119,55 @@ l3portd_get_prefix(int family, char *ip_address, void *prefix,
                    unsigned char *prefixlen)
 {
     char *p;
+    char *ip_address_copy;
     int maxlen = (family == AF_INET) ? L3PORTD_IPV4_MAX_LEN :
                                        L3PORTD_IPV6_MAX_LEN;
     *prefixlen = maxlen;
 
-    if ((p = strchr(ip_address, '/'))) {
+    /*
+     * Make a copy of the IP/IPv6 address.
+     */
+    ip_address_copy = xstrdup(ip_address);
+
+    /*
+     * Extract the mask length of the address.
+     */
+    if ((p = strchr(ip_address_copy, '/'))) {
         *p++ = '\0';
         *prefixlen = atoi(p);
     }
+
+    /*
+     * If the extracted mask length is greater
+     * than 'maxlen', then free the memory in
+     * 'ip_address_copy' and return -1.
+     */
     if (*prefixlen > maxlen) {
         VLOG_DBG("Bad prefixlen %d > %d", *prefixlen, maxlen);
-        return -1;
-    }
-    if (inet_pton(family, ip_address, prefix) == 0) {
-        VLOG_DBG("%d inet_pton failed with %s", family, strerror(errno));
+        free(ip_address_copy);
         return -1;
     }
 
+    /*
+     * If the extraction of the prefix fails, then
+     * free the memory in 'ip_address_copy' and return -1.
+     */
+    if (inet_pton(family, ip_address_copy, prefix) == 0) {
+        VLOG_DBG("%d inet_pton failed with %s", family, strerror(errno));
+        free(ip_address_copy);
+        return -1;
+    }
+
+    /*
+     * In case of successful extraction,
+     * free the memory in 'ip_address_copy'
+     * and return 0.
+     */
+    free(ip_address_copy);
     return 0;
 }
 
 /* HALON_TODO - ipv6 secondary address also shows up as primary in 'ip -6 addr show' - fix */
-/* HALON_TODO - unable to delete ipv6 address using netlink - fix */
 
 /* Set IP address on Linux interface using netlink sockets */
 static void
@@ -209,9 +236,10 @@ l3portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
         VLOG_ERR("Netlink failed to set IP address for '%s'", ip_address);
         return;
     }
-    VLOG_DBG("Netlink %s IP addr '%s' for port '%s'",
-              (cmd == RTM_NEWADDR) ? "added" : "deleted", ip_address,
-              port->name);
+
+    VLOG_DBG("Netlink %s IP addr '%s' and mask length = %u for port '%s'",
+             (cmd == RTM_NEWADDR) ? "added" : "deleted",
+             ip_address, prefixlen, port->name);
 }
 
 static struct net_address *
