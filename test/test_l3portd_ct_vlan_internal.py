@@ -15,6 +15,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import pytest
 from halonvsi.docker import *
 from halonvsi.halon import *
 
@@ -256,6 +257,7 @@ class Test_l3portd_vlan_int:
     def test_vlan_internal_cli(self):
         self.test.test_vlan_internal_cli()
 
+    @pytest.mark.skipif(True, reason="Hardware Dependent. Needs to be tested only on RTL")
     def test_vlan_internal_functionality(self):
         self.test.test_vlan_internal_functionality()
 
