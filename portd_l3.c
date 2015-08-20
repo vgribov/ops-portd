@@ -105,6 +105,7 @@ l3portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
     const struct ovsrec_vrf *row_vrf = NULL;
     struct ovsrec_nexthop *row_nh = NULL;
 
+    const bool selected = true;
     char prefix_str[256];
     int64_t distance = CONNECTED_ROUTE_DISTANCE;
     int retval;
@@ -184,6 +185,10 @@ l3portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
      * Connected routes have a distance of 0
      */
     ovsrec_route_set_distance(row, &distance, 1);
+    /*
+     * Set the selected bit to true for the route entry
+     */
+    ovsrec_route_set_selected(row, &selected, 1);
 
     /*
      * Populate the Nexthop row

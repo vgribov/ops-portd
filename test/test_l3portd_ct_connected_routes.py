@@ -72,37 +72,36 @@ class connectedRoutesCTTest( HalonTest ):
         for line in lines:
             if check:
                 if ('connected' in line and 'unicast' in line and
-                '10.0.10.0/24' in line):
-                    print '\nIPv4 connected route found. Success!\n'
-                    print line
+                '10.0.10.0/24' in line and 'true' in line):
+                    #print '\nIPv4 connected route found. Success!\n'
+                    #print line
                     count = count + 1
-                    print '\n'
+                    #print '\n'
                 elif ('connected' in line and 'unicast' in line and
-                '10.0.20.0/24' in line):
-                    print '\nIPv4 connected route found. Success!\n'
-                    print line
+                '10.0.20.0/24' in line and 'true' in line):
+                    #print '\nIPv4 connected route found. Success!\n'
+                    #print line
                     count = count + 1
-                    print '\n'
+                    #print '\n'
                 elif ('connected' in line and 'unicast' in line and
-                '2000::/120' in line):
-                    print '\nIPv6 connected route found. Success!\n'
-                    print line
+                '2000::/120' in line and 'true' in line):
+                    #print '\nIPv6 connected route found. Success!\n'
+                    #print line
                     count = count + 1
-                    print '\n'
+                    #print '\n'
                 elif ('connected' in line and 'unicast' in line and
-                '2001::/120' in line):
-                    print '\nIPv6 connected route found. Success!\n'
-                    print line
+                '2001::/120' in line and 'true' in line):
+                    #print '\nIPv6 connected route found. Success!\n'
+                    #print line
                     count = count + 1
-                    print '\n'
+                    #print '\n'
             if 'Route table' in line:
                 check = True
             if 'Route_Map table' in line:
                 check = False
-        if count < 4:
-            info ('Test Failed\n')
+        assert count == 4, "Connected routes not populated in DB"
 
-        info('########## Test Passed ##########\n')
+        info('########## Test Passed ##########\n\n\n')
 
 class Test_l3portd_connected_routes:
 
@@ -121,7 +120,7 @@ class Test_l3portd_connected_routes:
     def test_testZebra(self):
         # Function to validate connected routes in db
         self.test.testConnectedRoutes()
-        CLI(self.test.net)
+        #CLI(self.test.net)
 
     def __del__(self):
         del self.test

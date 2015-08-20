@@ -166,6 +166,8 @@ l3portd_init(const char *remote)
     ovsdb_idl_omit_alert(idl, &ovsrec_route_col_distance);
     ovsdb_idl_add_column(idl, &ovsrec_route_col_vrf);
     ovsdb_idl_omit_alert(idl, &ovsrec_route_col_vrf);
+    ovsdb_idl_add_column(idl, &ovsrec_route_col_selected);
+    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_selected);
 
     unixctl_command_register("l3portd/dump", "", 0, 0,
                              l3portd_unixctl_dump, NULL);
