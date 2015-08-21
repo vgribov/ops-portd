@@ -31,7 +31,7 @@ include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}
 set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror")
 
 # Source files to build l3portd
-set (SOURCES l3portd.c l3portd_ipcfg.c)
+set (SOURCES l3portd.c portd_l3.c)
 
 # Rules to build l3portd
 add_executable (${L3PORTD} ${SOURCES})

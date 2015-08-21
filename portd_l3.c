@@ -14,7 +14,7 @@
  *   License for the specific language governing permissions and limitations
  *   under the License.
  *
- * File: l3portd_ipcfg.c
+ * File: portd_l3.c
  */
 
 #include <errno.h>
@@ -26,16 +26,302 @@
 #include <net/if.h>
 #include <linux/if_addr.h>
 #include <unistd.h>
+#include <assert.h>
 
 #include "hash.h"
 #include "l3portd.h"
 #include "openvswitch/vlog.h"
 
-VLOG_DEFINE_THIS_MODULE(l3portd_ipcfg);
+VLOG_DEFINE_THIS_MODULE(portd_l3);
 
 extern unsigned int idl_seqno;
+extern struct ovsdb_idl *idl;
+extern struct ovsdb_idl_txn *txn;
+extern bool commit_txn;
 
 static int nl_ip_sock;
+static int l3portd_get_prefix(int family, char *ip_address, void *prefix,
+                              unsigned char *prefixlen);
+
+/*********** Begin Connected routes handling **************/
+
+static void
+apply_mask_ipv6 (struct prefix_ipv6 *p)
+{
+    u_char *pnt;
+    int index;
+    int offset;
+    static u_char maskbit[] = {0x00, 0x80, 0xc0, 0xe0, 0xf0,
+                                0xf8, 0xfc, 0xfe, 0xff};
+
+    index = p->prefixlen / 8;
+
+    if (index < 16) {
+        pnt = (u_char *) &p->prefix;
+        offset = p->prefixlen % 8;
+
+        pnt[index] &= maskbit[offset];
+        index++;
+
+        while (index < 16) {
+            pnt[index++] = 0;
+        }
+    }
+}
+
+/* Convert masklen into IP address's netmask (network byte order). */
+static void
+masklen2ip (const int masklen, struct in_addr *netmask)
+{
+    assert (masklen >= 0 && masklen <= L3PORTD_IPV4_MAX_LEN);
+
+    /* left shift is only defined for less than the size of the type.
+     * we unconditionally use long long in case the target platform
+     * has defined behaviour for << 32 (or has a 64-bit left shift) */
+    if (sizeof(unsigned long long) > 4) {
+        netmask->s_addr = htonl(0xffffffffULL << (32 - masklen));
+    } else {
+        netmask->s_addr = htonl(masklen ? 0xffffffffU << (32 - masklen) : 0);
+    }
+}
+
+/* Apply mask to IPv4 prefix (network byte order). */
+static void
+apply_mask_ipv4 (struct prefix_ipv4 *p)
+{
+    struct in_addr mask;
+    masklen2ip(p->prefixlen, &mask);
+    p->prefix.s_addr &= mask.s_addr;
+}
+
+/*
+ * Add a directly connected route to the DB. The NH is the port which
+ * will be the egress port for the subnet
+ */
+static int
+l3portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
+{
+    const struct ovsrec_route *row = NULL;
+    const struct ovsrec_vrf *row_vrf = NULL;
+    struct ovsrec_nexthop *row_nh = NULL;
+
+    const bool selected = true;
+    char prefix_str[256];
+    int64_t distance = CONNECTED_ROUTE_DISTANCE;
+    int retval;
+
+    /*
+     * HALON_TODO: For now we support only 1 VRF in the system.
+     * When we have support for multiple VRF, then fetch the
+     * correct VRF for the port
+     */
+    row_vrf = ovsrec_vrf_first(idl);
+    if(!row_vrf) {
+        VLOG_ERR("No vrf information yet.");
+        return -1;
+    }
+    /*
+     * Populate the route row
+     */
+    row = ovsrec_route_insert(txn);
+    ovsrec_route_set_vrf(row, row_vrf);
+    if (is_v4) {
+        struct prefix_ipv4 v4_prefix;
+        char buf[INET_ADDRSTRLEN];
+
+        ovsrec_route_set_address_family(row,
+                        OVSREC_ROUTE_ADDRESS_FAMILY_IPV4);
+        /*
+         * Conversion to prefix format is a 3 step process:
+         * - Convert the IP address string to prefix format.
+         * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
+         * - Convert it back to string to write to DB
+         */
+        retval = l3portd_get_prefix(AF_INET, ovs_port->ip4_address,
+                                    &v4_prefix.prefix, &v4_prefix.prefixlen);
+        if (retval) {
+            VLOG_ERR("Error converting DB string to prefix: %s",
+                     ovs_port->ip4_address);
+            return retval;
+        }
+        apply_mask_ipv4(&v4_prefix);
+
+        inet_ntop (AF_INET, &(v4_prefix.prefix), buf, INET_ADDRSTRLEN);
+        snprintf (prefix_str, INET_PREFIX_SIZE,
+                  "%s/%d", buf, v4_prefix.prefixlen);
+
+        ovsrec_route_set_prefix(row, (const char *)prefix_str);
+    } else {
+        struct prefix_ipv6 v6_prefix;
+        char buf[INET6_ADDRSTRLEN];
+
+        ovsrec_route_set_address_family(row,
+                        OVSREC_ROUTE_ADDRESS_FAMILY_IPV6);
+        /*
+         * Conversion to prefix format is a 3 step process:
+         * - Convert the IP address string to prefix format.
+         * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
+         * - Convert it back to string to write to DB
+         */
+        retval = l3portd_get_prefix(AF_INET6, ovs_port->ip6_address,
+                                    &v6_prefix.prefix, &v6_prefix.prefixlen);
+        if (retval) {
+            VLOG_ERR("Error converting DB string to prefix: %s",
+                     ovs_port->ip6_address);
+            return retval;
+        }
+        apply_mask_ipv6(&v6_prefix);
+
+        inet_ntop (AF_INET6, &(v6_prefix.prefix), buf, INET6_ADDRSTRLEN);
+        snprintf (prefix_str, INET6_PREFIX_SIZE,
+                  "%s/%d", buf, v6_prefix.prefixlen);
+
+        ovsrec_route_set_prefix(row, (const char *)prefix_str);
+    }
+    ovsrec_route_set_sub_address_family(row,
+                        OVSREC_ROUTE_SUB_ADDRESS_FAMILY_UNICAST);
+    ovsrec_route_set_from(row, OVSREC_ROUTE_FROM_CONNECTED);
+    /*
+     * Connected routes have a distance of 0
+     */
+    ovsrec_route_set_distance(row, &distance, 1);
+    /*
+     * Set the selected bit to true for the route entry
+     */
+    ovsrec_route_set_selected(row, &selected, 1);
+
+    /*
+     * Populate the Nexthop row
+     */
+    row_nh = ovsrec_nexthop_insert(txn);
+
+    ovsrec_nexthop_set_ports(row_nh, &ovs_port, row_nh->n_ports + 1);
+
+    /*
+     * Update the route entry with the new nexthop
+     */
+    ovsrec_route_set_nexthops(row, &row_nh, row->n_nexthops + 1);
+
+    commit_txn = true;
+
+    return 0;
+}
+
+static bool
+is_route_matched (const struct ovsrec_route *row_route, char *prefix_str,
+                  char *port_name)
+{
+    if (!strcmp(row_route->prefix, prefix_str) &&
+        !strcmp(row_route->from, OVSREC_ROUTE_FROM_CONNECTED) &&
+        (row_route->sub_address_family == NULL ||
+         !strcmp(row_route->sub_address_family,
+                OVSREC_ROUTE_SUB_ADDRESS_FAMILY_UNICAST)) &&
+        !strcmp(row_route->nexthops[0]->ports[0]->name, port_name)) {
+        return true;
+    }
+    return false;
+}
+
+/*
+ * Delete a directly connected route to the DB. The NH is the port which
+ * will be the egress port for the subnet
+ */
+static int
+l3portd_del_connected_route (char *address, char *port_name, bool is_v4)
+{
+    int retval;
+    char prefix_str[256];
+    const struct ovsrec_route *row_route = NULL;
+
+    /*
+     * Get the ip address from the port and convert it to the
+     * prefix format
+     */
+    if (is_v4) {
+        struct prefix_ipv4 v4_prefix;
+        char buf[INET_ADDRSTRLEN];
+        /*
+         * Conversion to prefix format is a 3 step process:
+         * - Convert the IP address string to prefix format.
+         * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
+         * - Convert it back to string
+         */
+        retval = l3portd_get_prefix(AF_INET, address, &v4_prefix.prefix,
+                                    &v4_prefix.prefixlen);
+        if (retval) {
+            VLOG_ERR("Error converting DB string to prefix: %s", address);
+            return retval;
+        }
+        apply_mask_ipv4(&v4_prefix);
+
+        inet_ntop (AF_INET, &(v4_prefix.prefix), buf, INET_ADDRSTRLEN);
+        snprintf (prefix_str, INET_PREFIX_SIZE,
+                  "%s/%d", buf, v4_prefix.prefixlen);
+
+        OVSREC_ROUTE_FOR_EACH(row_route, idl) {
+            if (row_route->address_family != NULL) {
+                if (strcmp(row_route->address_family, "ipv4")) {
+                    continue;
+                }
+            }
+            if (is_route_matched(row_route, prefix_str, port_name)) {
+                /*
+                 * Found the row. Delete the route and its nexthop
+                 */
+                ovsrec_nexthop_delete(row_route->nexthops[0]);
+                ovsrec_route_delete(row_route);
+                commit_txn = true;
+                return 0;
+            }
+        }
+    } else {
+        struct prefix_ipv6 v6_prefix;
+        char buf[INET6_ADDRSTRLEN];
+        /*
+         * Conversion to prefix format is a 3 step process:
+         * - Convert the IP address string to prefix format.
+         * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
+         * - Convert it back to string
+         */
+        retval = l3portd_get_prefix(AF_INET6, address, &v6_prefix.prefix,
+                                    &v6_prefix.prefixlen);
+        if (retval) {
+            VLOG_ERR("Error converting DB string to prefix: %s", address);
+            return retval;
+        }
+        apply_mask_ipv6(&v6_prefix);
+
+        inet_ntop (AF_INET6, &(v6_prefix.prefix), buf, INET6_ADDRSTRLEN);
+        snprintf (prefix_str, INET6_PREFIX_SIZE,
+                  "%s/%d", buf, v6_prefix.prefixlen);
+
+        OVSREC_ROUTE_FOR_EACH(row_route, idl) {
+            if (row_route->address_family == NULL ||
+                strcmp(row_route->address_family, "ipv6")) {
+                /*
+                 * Skip NULL and non ipv6 address families
+                 */
+                continue;
+            }
+            if (is_route_matched(row_route, prefix_str, port_name)) {
+                /*
+                 * Found the row. Delete the route and its nexthop
+                 */
+                ovsrec_nexthop_delete(row_route->nexthops[0]);
+                ovsrec_route_delete(row_route);
+                commit_txn = true;
+                return 0;
+            }
+        }
+    }
+    /*
+     * We should have found an entry and returned before we hit the end
+     */
+    VLOG_ERR("Connected route not found for port %s",port_name);
+    return -1;
+}
+
+/*********** End Connected routes handling **************/
 
 static
 int l3portd_netlink_socket_open(void)
@@ -393,9 +679,17 @@ l3portd_del_ipaddr(struct port *port)
 
     if (port->ip4_address) {
         l3portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address, AF_INET, false);
+        /*
+         * Delete the route
+         */
+        l3portd_del_connected_route(port->ip4_address, port->name, true);
     }
     if (port->ip6_address) {
         l3portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address, AF_INET6, false);
+        /*
+         * Delete the route
+         */
+        l3portd_del_connected_route(port->ip6_address, port->name, false);
     }
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip4addr) {
         l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, false);
@@ -417,21 +711,37 @@ l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
             if (strcmp(port->ip4_address, port_row->ip4_address) != 0) {
                 l3portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address,
                                    AF_INET, false);
+                /*
+                 * Delete the old route
+                 */
+                l3portd_del_connected_route(port->ip4_address, port->name, true);
                 free(port->ip4_address);
 
                 port->ip4_address = xstrdup(port_row->ip4_address);
                 l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address,
                                    AF_INET, false);
+                /*
+                 * Add the new route
+                 */
+                l3portd_add_connected_route(port_row, true);
             }
         } else {
             port->ip4_address = xstrdup(port_row->ip4_address);
             l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address,
                                AF_INET, false);
+            /*
+             * Add a new route
+             */
+            l3portd_add_connected_route(port_row, true);
         }
     } else {
         if (port->ip4_address != NULL) {
             l3portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address,
                                AF_INET, false);
+            /*
+             * Delete the route
+             */
+            l3portd_del_connected_route(port->ip4_address, port->name, true);
             free(port->ip4_address);
             port->ip4_address = NULL;
         }
@@ -442,21 +752,37 @@ l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
             if (strcmp(port->ip6_address, port_row->ip6_address) !=0) {
                 l3portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address,
                                    AF_INET6, false);
+                /*
+                 * Delete the old route
+                 */
+                l3portd_del_connected_route(port->ip6_address, port->name, false);
                 free(port->ip6_address);
 
                 port->ip6_address = xstrdup(port_row->ip6_address);
                 l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address,
                                    AF_INET6, false);
+                /*
+                 * Add the new route
+                 */
+                l3portd_add_connected_route(port_row, false);
             }
         } else {
             port->ip6_address = xstrdup(port_row->ip6_address);
             l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address,
                                AF_INET6, false);
+            /*
+             * Add the new route
+             */
+            l3portd_add_connected_route(port_row, false);
         }
     } else {
         if (port->ip6_address != NULL) {
             l3portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address,
                                AF_INET6, false);
+            /*
+             * Delete the route
+             */
+            l3portd_del_connected_route(port->ip6_address, port->name, false);
             free(port->ip6_address);
             port->ip6_address = NULL;
         }
@@ -473,7 +799,7 @@ l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
 
     if (OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_port_col_ip6_address_secondary,
                                       idl_seqno) ) {
-        VLOG_INFO("ip6_address_secondary modified");
+        VLOG_DBG("ip6_address_secondary modified");
         l3portd_config_secondary_ipv6_addr(port, port_row);
     }
 
