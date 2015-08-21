@@ -29,6 +29,8 @@
 #define L3PORTD_POLL_INTERVAL 5
 #define L3PORTD_IPV4_MAX_LEN 32
 #define L3PORTD_IPV6_MAX_LEN 128
+#define L3PORT_INTERFACE_ADMIN_UP "up" // Interface admin state "up"
+#define L3PORT_INTERFACE_ADMIN_DOWN "down" // Interface admin state "down"
 
 #define INET_ADDRSTRLEN     16
 #define INET_PREFIX_SIZE    18
@@ -90,6 +92,11 @@ void l3portd_exit_ipcfg(void);
 void l3portd_init_ipcfg(void);
 void l3portd_config_iprouting(int enable);
 void l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row);
+void l3portd_del_ipv4_addr(struct port *port);
+void l3portd_del_ipv6_addr(struct port *port);
 void l3portd_del_ipaddr(struct port *port);
+void l3portd_add_ipv4_addr(struct port *port);
+void l3portd_add_ipv6_addr(struct port *port);
+void l3portd_add_ipaddr(struct port *port);
 
 #endif /* L3PORTD_H_ */

@@ -523,9 +523,10 @@ l3portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
         return;
     }
 
-    VLOG_DBG("Netlink %s IP addr '%s' and mask length = %u for port '%s'",
+    VLOG_DBG("Netlink %s IP addr '%s' and mask length = %u (%s) for port '%s'",
              (cmd == RTM_NEWADDR) ? "added" : "deleted",
-             ip_address, prefixlen, port->name);
+             ip_address, prefixlen, secondary ? "secondary":"primary",
+             port->name);
 }
 
 static struct net_address *
@@ -671,32 +672,121 @@ l3portd_config_secondary_ipv4_addr(struct port *port,
     }
 }
 
-/* deletes ip address from kernel */
+/**
+ * This function adds ipv4 address on a given port to kernel.
+ */
 void
-l3portd_del_ipaddr(struct port *port)
+l3portd_add_ipv4_addr(struct port *port)
 {
     struct net_address *addr, *next_addr;
 
+    if (!port) {
+        VLOG_DBG("The port on which the addresses need to be added into "
+                 "kernel is null\n");
+        return;
+    }
+
     if (port->ip4_address) {
-        l3portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address, AF_INET, false);
-        /*
-         * Delete the route
-         */
-        l3portd_del_connected_route(port->ip4_address, port->name, true);
+        l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address, AF_INET,
+                           false);
     }
-    if (port->ip6_address) {
-        l3portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address, AF_INET6, false);
-        /*
-         * Delete the route
-         */
-        l3portd_del_connected_route(port->ip6_address, port->name, false);
-    }
+
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip4addr) {
-        l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, false);
+        l3portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET, true);
     }
+}
+
+/**
+ * This function adds ipv6 address on a given port to kernel.
+ */
+void
+l3portd_add_ipv6_addr(struct port *port)
+{
+    struct net_address *addr, *next_addr;
+
+    if (!port) {
+        VLOG_DBG("The port on which the addresses need to be added into "
+                 "kernel is null\n");
+        return;
+    }
+
+    if (port->ip6_address) {
+        l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address, AF_INET6,
+                           false);
+    }
+
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip6addr) {
-        l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET6, false);
+        l3portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET6, true);
     }
+}
+
+/**
+ * This functionn adds both ipv4 and ipv6 addresses on a given port to kernel
+ */
+void
+l3portd_add_ipaddr(struct port *port)
+{
+    l3portd_add_ipv4_addr(port);
+    l3portd_add_ipv6_addr(port);
+}
+
+/**
+ * This function deletes ipv4 address on a given port from kernel
+ */
+void
+l3portd_del_ipv4_addr(struct port *port)
+{
+    struct net_address *addr, *next_addr;
+
+    if (!port) {
+        VLOG_DBG("The port on which the addresses need to be deleted into "
+                 "kernel is null\n");
+        return;
+    }
+
+    if (port->ip4_address) {
+        l3portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address, AF_INET,
+                           false);
+    }
+
+    HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip4addr) {
+        l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, true);
+    }
+}
+
+/**
+ * This function deletes ipv6 address on a given port from kernel
+ */
+void
+l3portd_del_ipv6_addr(struct port *port)
+{
+    struct net_address *addr, *next_addr;
+
+    if (!port) {
+        VLOG_DBG("The port on which the addresses need to be deleted into "
+                 "kernel is null\n");
+        return;
+    }
+
+    if (port->ip6_address) {
+        l3portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address, AF_INET6,
+                           false);
+    }
+
+    HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip6addr) {
+        l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET6, true);
+    }
+}
+
+/**
+ * This function deletes both ipv4 and ipv6 address on a given port
+ * from kernel
+ */
+void
+l3portd_del_ipaddr(struct port *port)
+{
+    l3portd_del_ipv4_addr(port);
+    l3portd_del_ipv6_addr(port);
 }
 
 /* Take care of add/delete/modify of v4/v6 address from db */

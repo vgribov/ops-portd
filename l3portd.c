@@ -95,6 +95,7 @@ l3portd_chk_for_system_configured(void)
  *      configure the IP in Linux kernel interfaces using netlink sockets.
  * When IP addresses are removed/modified, reflect the same in Linux.
  * When VRF is added/deleted, enable/disable Linux forwarding (routing).
+ * When Interface transitions its admin state.
  */
 static void
 l3portd_init(const char *remote)
@@ -128,6 +129,18 @@ l3portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_port_col_ip4_address_secondary);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_ip6_address);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_ip6_address_secondary);
+
+    /*
+     * Adding the interface table so that we can listen to interface
+     * "up"/"down" notifications. We need to add two columns to the
+     * interface table:-
+     * 1. Interface name for finding which port corresponding to the
+     *    interface went "up"/"down".
+     * 2. Interface admin state.
+     */
+    ovsdb_idl_add_table(idl, &ovsrec_table_interface);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_name);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_admin_state);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_vlan);
     ovsdb_idl_add_column(idl, &ovsrec_vlan_col_name);
@@ -272,6 +285,33 @@ l3portd_del_internal_vlan(int internal_vid)
     }
 }
 
+/**
+ * This function returns the 'port' structure corresponding to a
+ * port 'name' in a given 'vrf'. If the port does not not exist
+ * within the 'vrf', then this function will return 'NULL'.
+ */
+static struct port*
+l3portd_port_lookup(const struct vrf *vrf, const char *name)
+{
+    struct port *port;
+
+    if (!vrf || !name) {
+        VLOG_DBG("vrf is %s and port name is %s\n",
+                 vrf ? vrf->name:"NULL",
+                 name ? name:"NULL");
+        return NULL;
+    }
+
+    HMAP_FOR_EACH_WITH_HASH (port, port_node, hash_string(name, 0),
+                             &vrf->ports) {
+        if (!strcmp(port->name, name)) {
+            return port;
+        }
+    }
+
+    return NULL;
+}
+
 /* delete vrf from cache */
 static void
 l3portd_vrf_del(struct vrf *vrf)
@@ -346,6 +386,100 @@ l3portd_add_del_vrf(void)
     shash_destroy(&new_vrfs);
 }
 
+/**
+ * This function processes the interface "up"/"down" notifications
+ * that are received from OVSDB. In response to a change in interface
+ * admin state, this function does the following:
+ * 1. The functions finds the port structure corresponding to the
+ *    interface name whose state has changed. For this we need to
+ *    iterate over all the vrfs in our cache and find the port
+ *    structure corresponding to the interface name.
+ * 2. In event, we find a port structure corresponding to the
+ *    interface name and the interface administration state went to
+ *    "up", we go ahead and reprogram the IPv6 addresses on that
+ *    port.
+ */
+static void
+l3portd_process_interace_up_down_events(void)
+{
+    const struct ovsrec_interface *interface_row = NULL;
+    struct vrf* vrf;
+    struct port* port;
+
+    /*
+     * Check if the admin state column changed in this interface
+     * change notification.
+     */
+    if (OVSREC_IDL_IS_COLUMN_MODIFIED(
+               ovsrec_interface_col_admin_state, idl_seqno)) {
+        /*
+         * Iterate through all the interface rows in the interface
+         * table.
+         */
+        OVSREC_INTERFACE_FOR_EACH (interface_row, idl) {
+
+            VLOG_DBG("Got a notification for interface %s "
+                     "for admin state %s\n",
+                     interface_row->name, interface_row->admin_state);
+
+            /*
+             * If the interface row changed due to admin state change,
+             * then find the port corresponding to the interface name
+             * by iterating over all the ports in a given vrf. We are
+             * assuming that port name and the interface name are same.
+             */
+            if (OVSREC_IDL_IS_ROW_MODIFIED(interface_row, idl_seqno)) {
+
+                VLOG_DBG("Interface %s admin state changed\n",
+                         interface_row->name);
+
+                /*
+                 * Get the port data structure to reconfigure the IPv6
+                 * addresses in order to reconfigure them back into
+                 * the kernel.
+                 */
+                vrf = NULL;
+                port = NULL;
+                HMAP_FOR_EACH (vrf, node, &all_vrfs) {
+
+                    port = l3portd_port_lookup(vrf, interface_row->name);
+
+                    /*
+                     * If a valid port structure is found, the break.
+                     */
+                    if (port) {
+                        VLOG_DBG("Found the port corresponding "
+                                 "to the interface %s\n",
+                                 interface_row->name);
+                        break;
+                    }
+                }
+
+                if (port) {
+
+                    /*
+                     * If the interface event is administratively forced to,
+                     * 'L3PORT_INTERFACE_ADMIN_UP' reprogram the primary
+                     * port address and all the secondary port addresses
+                     * on the port. This needs to be done for IPv6 since
+                     * the IPv6 addresses get deleted from the kernel when
+                     * the kernel interface is administratively forced
+                     * 'L3PORT_INTERFACE_ADMIN_DOWN'.
+                     */
+                    if (strcmp(interface_row->admin_state,
+                               L3PORT_INTERFACE_ADMIN_UP) == 0) {
+
+                        VLOG_DBG("Reprogramming the IPv6 address again since "
+                                 "the interface is forced up again");
+
+                        l3portd_add_ipv6_addr(port);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /* collect the ports from the current config in db */
 static void
 l3portd_collect_wanted_ports(struct vrf *vrf,
@@ -396,21 +530,6 @@ l3portd_port_create(struct vrf *vrf, struct ovsrec_port *port_row)
 
     VLOG_DBG("port '%s' created", port->name);
     return;
-}
-
-static struct port*
-l3portd_port_lookup(const struct vrf *vrf, const char *name)
-{
-    struct port *port;
-
-    HMAP_FOR_EACH_WITH_HASH (port, port_node, hash_string(name, 0),
-                             &vrf->ports) {
-        if (!strcmp(port->name, name)) {
-            return port;
-        }
-    }
-
-    return NULL;
 }
 
 /* HALON_TODO - update port table status column with error if no VLAN allocated. */
@@ -655,11 +774,17 @@ l3portd_reconfigure(void)
 {
     unsigned int new_idl_seqno = ovsdb_idl_get_seqno(idl);
 
+    VLOG_DBG("Received a OVSDB change notification "
+             "with current idl as %u and new idl as %u\n",
+             idl_seqno, new_idl_seqno);
+
     if (new_idl_seqno == idl_seqno){
         return;
     }
+
     l3portd_add_del_vrf();
     l3portd_add_del_ports();
+    l3portd_process_interace_up_down_events();
 
     idl_seqno = new_idl_seqno; /* This has to be done after all changes are done */
     return;
