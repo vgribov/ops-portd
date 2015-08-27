@@ -126,6 +126,7 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_bridge_col_name);
     ovsdb_idl_add_column(idl, &ovsrec_bridge_col_vlans);
     ovsdb_idl_omit_alert(idl, &ovsrec_bridge_col_vlans);
+    ovsdb_idl_add_column(idl, &ovsrec_bridge_col_ports);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_port);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_name);
@@ -135,6 +136,8 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_port_col_ip4_address_secondary);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_ip6_address);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_ip6_address_secondary);
+    ovsdb_idl_add_column(idl, &ovsrec_port_col_interfaces);
+    ovsdb_idl_add_column(idl, &ovsrec_port_col_tag);
 
     /*
      * Adding the interface table so that we can listen to interface
@@ -143,11 +146,14 @@ portd_init(const char *remote)
      * 1. Interface name for finding which port corresponding to the
      *    interface went "up"/"down".
      * 2. Interface admin state.
+     * 3. Interface type. If it's "internal", then create a VLAN interface in
+     *    kernel.
      */
     ovsdb_idl_add_table(idl, &ovsrec_table_interface);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_name);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_admin_state);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_user_config);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_type);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_vlan);
     ovsdb_idl_add_column(idl, &ovsrec_vlan_col_name);
@@ -270,6 +276,14 @@ portd_bridge_del_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
     free(vlans);
 }
 
+/**
+ * Function: portd_del_internal_vlan
+ * Param:
+ *      interface_vid: ID of the internal VLAN that must be removed from default
+ *      bridge row.
+ * Description: Delete a VLAN from bridge table. Specifically, delete internal
+ *              VLAN from default-bridge row.
+ */
 static void
 portd_del_internal_vlan(int internal_vid)
 {
@@ -393,59 +407,10 @@ portd_add_del_vrf(void)
     shash_destroy(&new_vrfs);
 }
 
-static int
-portd_change_if_state (const char *ifname, bool intf_up)
-{
-    struct ifreq ifr;
-
-    int rc;
-    struct {
-        struct nlmsghdr n;
-        struct ifinfomsg ifi;
-        char buf[128];
-    } req;
-
-    memset(&req, 0, sizeof(req));
-
-    /*
-     * HALON_TODO: Convert the ioctl to netlink socket
-     * messages to read the flags before writing it
-     * back to the kernel
-     */
-    ioctl(nl_ip_sock, SIOCGIFFLAGS, &ifr);
-
-    req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
-    req.n.nlmsg_type = RTM_SETLINK;
-    req.n.nlmsg_flags = NLM_F_REQUEST;
-
-    req.ifi.ifi_family = AF_UNSPEC;
-    req.ifi.ifi_index = if_nametoindex(ifname);
-    if (intf_up == true) {
-        req.ifi.ifi_flags = ifr.ifr_flags | IFF_UP;
-    } else {
-        req.ifi.ifi_flags = ifr.ifr_flags & ~IFF_UP;
-    }
-    req.ifi.ifi_change = 0xffffffff;
-
-    req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len);
-
-    if (req.n.nlmsg_len > sizeof(req)) {
-        VLOG_ERR("Message length (%d) exceeded max (%d)",
-                 req.n.nlmsg_len, (int)sizeof(req));
-    }
-
-    rc = send(nl_ip_sock, &req, req.n.nlmsg_len, 0);
-    if (rc < 0) {
-        VLOG_ERR("Error sending interface state message");
-    }
-    return rc;
-}
-
 static void
 portd_process_interface_admin_up_down_events (void)
 {
     const struct ovsrec_interface *interface_row = NULL;
-    bool int_up = false;
     struct smap user_config;
     const char *admin_status;
 
@@ -458,16 +423,15 @@ portd_process_interface_admin_up_down_events (void)
 
                 if (admin_status != NULL &&
                     !strcmp(admin_status, OVSREC_INTERFACE_USER_CONFIG_ADMIN_UP)) {
-                    int_up = true;
+                    portd_interface_up_down(interface_row->name, OVSREC_INTERFACE_USER_CONFIG_ADMIN_UP);
+                } else {
+                    portd_interface_up_down(interface_row->name, OVSREC_INTERFACE_USER_CONFIG_ADMIN_DOWN);
                 }
 
                 smap_destroy(&user_config);
-
-                portd_change_if_state(interface_row->name, int_up);
             }
         }
     }
-
 }
 
 /**
@@ -588,6 +552,12 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
     HMAP_FOR_EACH_SAFE (port, next, port_node, &vrf->ports) {
         port->cfg = shash_find_data(wanted_ports, port->name);
         if (!port->cfg) {
+
+            /* Send delete interface to kernel */
+            if (strcmp(port->type, INTERFACE_TYPE_INTERNAL)==0) {
+                portd_del_vlan_interface(port->name);
+            }
+
             /* Port not present in the wanted_ports list. Destroy */
             portd_del_internal_vlan(port->internal_vid);
             portd_del_ipaddr(port);
@@ -605,6 +575,7 @@ portd_port_create(struct vrf *vrf, struct ovsrec_port *port_row)
     port = xzalloc(sizeof *port);
     port->vrf = vrf;
     port->name = xstrdup(port_row->name);
+    port->type = NULL; /* regular (non-intervlan) interface */
     port->cfg = port_row;
     port->internal_vid = -1;
     hmap_init(&port->secondary_ip4addr);
@@ -801,6 +772,120 @@ portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
 
 }
 
+/**
+ * Function: portd_interface_type_internal_check
+ * Param:
+ *      port: port record whose interfaces are examined for "internal" type.
+ *      interface_name: Name of interface to check "internal" type.
+ * Return:
+ *      1: Provided interface exists and is of type "internal"
+ *      0: Provide interface either doesn't exist or not "internal" type.
+ */
+static int
+portd_interface_type_internal_check(const struct ovsrec_port *port, const char *interface_name)
+{
+    struct ovsrec_interface *intf;
+    size_t i=0;
+
+    for(i=0; i<port->n_interfaces; ++i) {
+        intf = port->interfaces[i];
+        if (strcmp(port->name, intf->name)==0 &&
+            strcmp(intf->type, INTERFACE_TYPE_INTERNAL)==0) {
+
+            VLOG_DBG("[%s:%d]: Interface %s is of type \"internal\" found. ",
+                        __FUNCTION__, __LINE__, interface_name);
+            return 1;
+        }
+    }
+
+    VLOG_DBG("[%s:%d]: Interface %s is NOT of type \"internal\". ",
+                __FUNCTION__, __LINE__, interface_name);
+    return 0;
+}
+
+/**
+ * Function: portd_port_in_bridge_check
+ * Param:
+ *      port_name: Name of port that is examined in bridge normal record.
+ *      bridge_name: Name of bridge to be examined. If NULL/Empty, check all
+ *                   bridge records.
+ * Return:
+ *      1: Provided port is present in "bridge_normal"
+ *      0: Provide port is not in "bridge_normal"
+ */
+static int
+portd_port_in_bridge_check(const char *port_name, const char *bridge_name)
+{
+    const struct ovsrec_bridge *row, *next;
+    struct ovsrec_port  *port;
+    size_t  i;
+
+    OVSREC_BRIDGE_FOR_EACH_SAFE(row, next, idl) {
+        /* OPENSWITCH_TODO: is strcmp() right api? */
+        if (bridge_name &&
+            (strcmp(bridge_name, PORTD_EMPTY_STRING) !=0) &&
+            (strcmp(row->name, bridge_name) != 0)) {
+            continue;
+        }
+
+        for(i=0; i<row->n_ports; i++) {
+            port = row->ports[i];
+            /* input port is part of one of bridge */
+            if (strcmp(port->name, port_name)==0) {
+                VLOG_DBG("[%s:%d]: Port %s is part of bridge %s", __FUNCTION__,
+                                __LINE__, port_name, bridge_name);
+                return 1;
+            }
+        }
+    }
+
+    VLOG_DBG("[%s:%d]: Port %s is NOT found in bridge %s", __FUNCTION__,
+            __LINE__, port_name, bridge_name);
+
+    return 0;
+}
+
+/**
+ * Function: portd_port_in_vrf_check
+ * Param:
+ *      port_name: Name of port that is examined in default VRF record.
+ *      vrf_name: Name of VRF to be examined. NULL/empty string means, search
+ *                ALL VRF records.
+ * Return:
+ *      1: Provided port is present in default VRF
+ *      0: Provide port is not in default VRF
+ */
+static int
+portd_port_in_vrf_check(const char *port_name, const char *vrf_name)
+{
+    const struct ovsrec_vrf *row, *next;
+    struct ovsrec_port  *port;
+    size_t  i;
+
+    OVSREC_VRF_FOR_EACH_SAFE (row, next, idl) {
+        if (vrf_name &&
+            (strcmp(vrf_name, PORTD_EMPTY_STRING) !=0) &&
+            (strcmp(row->name, vrf_name) != 0)) {
+            continue;
+        }
+
+        for(i=0; i<row->n_ports; i++) {
+            port = row->ports[i];
+            /* input port is part of one of bridge */
+            if (strcmp(port->name, port_name)==0) {
+                VLOG_DBG("[%s:%d]: Port %s is part of VRF %s", __FUNCTION__,
+                                __LINE__, port_name, vrf_name);
+                return 1;
+            }
+        }
+    }
+
+    VLOG_DBG("[%s:%d]: Port %s is NOT found in VRF %s", __FUNCTION__,
+            __LINE__, port_name, vrf_name);
+
+    return 0;
+}
+
 static void
 portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
 {
@@ -810,21 +895,35 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
         struct ovsrec_port *port_row = port_node->data;
         struct port *port = portd_port_lookup(vrf, port_row->name);
         if (!port) {
-
             VLOG_DBG("Creating new port %s vrf %s\n",port_row->name, vrf->name);
             portd_port_create(vrf, port_row);
             port = portd_port_lookup(vrf, port_row->name);
 
-            portd_add_internal_vlan(port, port_row);
+            if (portd_interface_type_internal_check(port_row, port_row->name) &&
+                portd_port_in_bridge_check(port_row->name, DEFAULT_BRIDGE_NAME) &&
+                portd_port_in_vrf_check(port_row->name, DEFAULT_VRF_NAME)) {
+
+                portd_add_vlan_interface(DEFAULT_BRIDGE_NAME, port_row->name,
+                                         *(port->cfg->tag));
+                portd_interface_up_down(port_row->name, "up");
+
+                port->type = xstrdup(INTERFACE_TYPE_INTERNAL);
+            } else {
+                portd_add_internal_vlan(port, port_row);
+            }
 
             portd_reconfig_ipaddr(port, port_row);
             VLOG_DBG("Port has IP: %s vrf %s\n", port_row->ip4_address,
                       vrf->name);
+
         } else if ((port) && OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) {
             portd_reconfig_ipaddr(port, port_row);
             /* Port table row modified */
             VLOG_DBG("Port modified IP: %s vrf %s\n", port_row->ip4_address,
                      vrf->name);
+        } else {
+            VLOG_DBG("[%s:%d]: port %s exists, but no change in seqno", __FUNCTION__,
+                            __LINE__, port_row->name);
         }
     }
 }
@@ -878,7 +977,6 @@ portd_reconfigure(void)
 static void
 portd_run(void)
 {
-
     ovsdb_idl_run(idl);
 
     if (ovsdb_idl_is_lock_contended(idl)) {

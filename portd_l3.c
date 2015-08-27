@@ -888,5 +888,207 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
         VLOG_DBG("ip6_address_secondary modified");
         portd_config_secondary_ipv6_addr(port, port_row);
     }
+}
 
+
+/**
+ * Function: add_link_attr
+ * Params:
+ *      n: pointer to start of netlink message. Mainly used to adjust message length.
+ *      nlmsg_maxlen: max allowed message length (header+payload).
+ *      attr_type: attribute type (typically, IFLA_XXX).
+ *      payload: data appended to nlmsg packet.
+ *      payload_len: length of data being appended.
+ * Return:
+ *      0: success
+ *     -1: buffer is full, can't add anymore payload.
+ */
+static int
+add_link_attr(struct nlmsghdr *n, int nlmsg_maxlen,
+              int attr_type, const void *payload, int payload_len)
+{
+    int len = RTA_LENGTH(payload_len);
+    struct rtattr *rta;
+
+    if (NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len) > nlmsg_maxlen) {
+        VLOG_ERR("message exceeded bound of %d. Failed to add attribute: %d",
+                 nlmsg_maxlen, attr_type);
+        return -1;
+    }
+
+    rta = NLMSG_TAIL(n);
+    rta->rta_type = attr_type;
+    rta->rta_len = len;
+    memcpy(RTA_DATA(rta), payload, payload_len);
+    n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len);
+    return 0;
+}
+
+/**
+ * Function: portd_add_vlan_interface
+ * Param:
+ *      interface_name: "Parent" interface on which vlan interface is created.
+ *      vlan_interface_name: Name of VLAN interface to be created.
+ *      vlan_tag: VLAN id.
+ * Return:
+ * Desc:
+ *      Insert VLAN interface <vlan_interface_name> on top of <interface_name>
+ *      with VLAN tag <vlan_tag>
+ */
+void
+portd_add_vlan_interface(const char *interface_name,
+                           const char *vlan_interface_name,
+                           const unsigned short vlan_tag)
+{
+    int     ifindex;
+
+    struct {
+        struct nlmsghdr  n;
+        struct ifinfomsg i;
+        char             buf[128];  /* must fit interface name length (IFNAMSIZ)
+                                       and attribute hdrs. */
+    } req;
+
+    memset(&req, 0, sizeof(req));
+
+    req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
+    req.n.nlmsg_pid     = getpid();
+    req.n.nlmsg_type    = RTM_NEWLINK;
+    req.n.nlmsg_flags   = NLM_F_REQUEST | NLM_F_CREATE;
+
+    req.i.ifi_family    = AF_UNSPEC;
+    ifindex             = if_nametoindex(interface_name);
+
+    if (ifindex == 0) {
+        VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
+        return;
+    }
+
+    struct rtattr *linkinfo = NLMSG_TAIL(&req.n);
+    add_link_attr(&req.n, sizeof(req), IFLA_LINKINFO, NULL, 0);
+    add_link_attr(&req.n, sizeof(req), IFLA_INFO_KIND, "vlan", 4);
+
+    struct rtattr * data = NLMSG_TAIL(&req.n);
+    add_link_attr(&req.n, sizeof(req), IFLA_INFO_DATA, NULL, 0);
+    add_link_attr(&req.n, sizeof(req), IFLA_VLAN_ID, &vlan_tag, 2);
+
+    /* Adjust rta_len for attributes */
+    data->rta_len = (void *)NLMSG_TAIL(&req.n) - (void *)data;
+    linkinfo->rta_len = (void *)NLMSG_TAIL(&req.n) - (void *)linkinfo;
+
+    add_link_attr(&req.n, sizeof(req), IFLA_LINK, &ifindex, 4);
+    add_link_attr(&req.n, sizeof(req), IFLA_IFNAME, vlan_interface_name,
+                  strlen(vlan_interface_name)+1);
+
+    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to create vlan interface: %s",
+                 vlan_interface_name);
+        return;
+    }
+}
+
+/**
+ * Function: portd_del_vlan_interface
+ * Param:
+ *      interface_name: "Parent" interface on which vlan interface is created.
+ *      vlan_interface_name: Name of VLAN interface to be created.
+ *      vlan_tag: VLAN id.
+ * Return:
+ * Desc:
+ *      Delete VLAN interface <vlan_interface_name>
+ * OPENSWITCH_TODO:
+ *      Code in this function can delete non-vlan interfaces as well. Generalize
+ *      the name.
+ */
+void
+portd_del_vlan_interface(const char *vlan_interface_name)
+{
+    struct {
+        struct nlmsghdr  n;
+        struct ifinfomsg i;
+        char             buf[128];  /* must fit interface name length (IFNAMSIZ)*/
+    } req;
+
+    memset(&req, 0, sizeof(req));
+
+    req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
+    req.n.nlmsg_pid     = getpid();
+    req.n.nlmsg_type    = RTM_DELLINK;
+    req.n.nlmsg_flags   = NLM_F_REQUEST;
+
+    req.i.ifi_family    = AF_UNSPEC;
+    req.i.ifi_index     = if_nametoindex(vlan_interface_name);
+
+    if (req.i.ifi_index == 0) {
+        VLOG_ERR("Unable to get ifindex for interface: %s", vlan_interface_name);
+        return;
+    }
+
+    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to delete vlan interface: %s",
+                 vlan_interface_name);
+        return;
+    }
+}
+
+/**
+ * Function: portd_interface_up_down
+ * Param:
+ *      vlan_interface_name: Name of the interface to be set to "up" or "down".
+ *      status: "up" or "down".
+ * Return:
+ * Desc:
+ *      Set an interface state to "up" or "down".
+ * OPENSWITCH_TODO:
+ *      Plugin to "shutdown"/"no shutdown" commands under an interface.
+ */
+void
+portd_interface_up_down(const char *interface_name, const char *status)
+{
+    if (status == NULL || strcmp(status, PORTD_EMPTY_STRING)==0) {
+        VLOG_ERR("Invalid status argument");
+        return;
+    }
+
+    if (interface_name == NULL ||
+            strcmp(interface_name, PORTD_EMPTY_STRING)==0) {
+        VLOG_ERR("Invalid interface-name as argument");
+        return;
+    }
+
+    struct {
+        struct nlmsghdr  n;
+        struct ifinfomsg i;
+        char             buf[128];  /* must fit interface name length (IFNAMSIZ)*/
+    } req;
+
+    memset(&req, 0, sizeof(req));
+
+    req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
+    req.n.nlmsg_pid     = getpid();
+    req.n.nlmsg_type    = RTM_NEWLINK;
+    req.n.nlmsg_flags   = NLM_F_REQUEST;
+
+    req.i.ifi_family    = AF_UNSPEC;
+    req.i.ifi_index     = if_nametoindex(interface_name);
+
+    if (req.i.ifi_index==0) {
+        VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
+        return;
+    }
+
+    /* OPENSWITCH_TODO: _May_ have to convert this to "no shutdown"/"shutdown" */
+    if (strcmp(status, "up")==0) {
+        req.i.ifi_change |= IFF_UP;
+        req.i.ifi_flags  |= IFF_UP;
+    } else if (strcmp(status, "down")==0) {
+        req.i.ifi_change |= IFF_UP;
+        req.i.ifi_flags  &= ~IFF_UP;
+    }
+
+    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to bring %s the interface %s", status,
+                 interface_name);
+        return;
+    }
 }
