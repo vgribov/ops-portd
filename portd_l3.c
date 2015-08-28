@@ -29,7 +29,7 @@
 #include <assert.h>
 
 #include "hash.h"
-#include "l3portd.h"
+#include "portd.h"
 #include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(portd_l3);
@@ -39,9 +39,9 @@ extern struct ovsdb_idl *idl;
 extern struct ovsdb_idl_txn *txn;
 extern bool commit_txn;
 
-static int nl_ip_sock;
-static int l3portd_get_prefix(int family, char *ip_address, void *prefix,
-                              unsigned char *prefixlen);
+int nl_ip_sock;
+static int portd_get_prefix(int family, char *ip_address, void *prefix,
+                            unsigned char *prefixlen);
 
 /*********** Begin Connected routes handling **************/
 
@@ -73,7 +73,7 @@ apply_mask_ipv6 (struct prefix_ipv6 *p)
 static void
 masklen2ip (const int masklen, struct in_addr *netmask)
 {
-    assert (masklen >= 0 && masklen <= L3PORTD_IPV4_MAX_LEN);
+    assert (masklen >= 0 && masklen <= PORTD_IPV4_MAX_LEN);
 
     /* left shift is only defined for less than the size of the type.
      * we unconditionally use long long in case the target platform
@@ -99,7 +99,7 @@ apply_mask_ipv4 (struct prefix_ipv4 *p)
  * will be the egress port for the subnet
  */
 static int
-l3portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
+portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
 {
     const struct ovsrec_route *row = NULL;
     const struct ovsrec_vrf *row_vrf = NULL;
@@ -137,8 +137,8 @@ l3portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
          * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
          * - Convert it back to string to write to DB
          */
-        retval = l3portd_get_prefix(AF_INET, ovs_port->ip4_address,
-                                    &v4_prefix.prefix, &v4_prefix.prefixlen);
+        retval = portd_get_prefix(AF_INET, ovs_port->ip4_address,
+                                  &v4_prefix.prefix, &v4_prefix.prefixlen);
         if (retval) {
             VLOG_ERR("Error converting DB string to prefix: %s",
                      ovs_port->ip4_address);
@@ -163,8 +163,8 @@ l3portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
          * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
          * - Convert it back to string to write to DB
          */
-        retval = l3portd_get_prefix(AF_INET6, ovs_port->ip6_address,
-                                    &v6_prefix.prefix, &v6_prefix.prefixlen);
+        retval = portd_get_prefix(AF_INET6, ovs_port->ip6_address,
+                                  &v6_prefix.prefix, &v6_prefix.prefixlen);
         if (retval) {
             VLOG_ERR("Error converting DB string to prefix: %s",
                      ovs_port->ip6_address);
@@ -227,7 +227,7 @@ is_route_matched (const struct ovsrec_route *row_route, char *prefix_str,
  * will be the egress port for the subnet
  */
 static int
-l3portd_del_connected_route (char *address, char *port_name, bool is_v4)
+portd_del_connected_route (char *address, char *port_name, bool is_v4)
 {
     int retval;
     char prefix_str[256];
@@ -246,8 +246,8 @@ l3portd_del_connected_route (char *address, char *port_name, bool is_v4)
          * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
          * - Convert it back to string
          */
-        retval = l3portd_get_prefix(AF_INET, address, &v4_prefix.prefix,
-                                    &v4_prefix.prefixlen);
+        retval = portd_get_prefix(AF_INET, address, &v4_prefix.prefix,
+                                  &v4_prefix.prefixlen);
         if (retval) {
             VLOG_ERR("Error converting DB string to prefix: %s", address);
             return retval;
@@ -283,8 +283,8 @@ l3portd_del_connected_route (char *address, char *port_name, bool is_v4)
          * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
          * - Convert it back to string
          */
-        retval = l3portd_get_prefix(AF_INET6, address, &v6_prefix.prefix,
-                                    &v6_prefix.prefixlen);
+        retval = portd_get_prefix(AF_INET6, address, &v6_prefix.prefix,
+                                  &v6_prefix.prefixlen);
         if (retval) {
             VLOG_ERR("Error converting DB string to prefix: %s", address);
             return retval;
@@ -324,7 +324,7 @@ l3portd_del_connected_route (char *address, char *port_name, bool is_v4)
 /*********** End Connected routes handling **************/
 
 static
-int l3portd_netlink_socket_open(void)
+int portd_netlink_socket_open(void)
 {
     struct sockaddr_nl s_addr;
 
@@ -346,26 +346,26 @@ int l3portd_netlink_socket_open(void)
 }
 
 static
-void l3portd_netlink_socket_close(int socket)
+void portd_netlink_socket_close(int socket)
 {
     close(socket);
 }
 
 void
-l3portd_exit_ipcfg(void)
+portd_exit_ipcfg(void)
 {
-    l3portd_netlink_socket_close(nl_ip_sock);
+    portd_netlink_socket_close(nl_ip_sock);
 }
 
 void
-l3portd_init_ipcfg(void)
+portd_init_ipcfg(void)
 {
-    nl_ip_sock = l3portd_netlink_socket_open();
+    nl_ip_sock = portd_netlink_socket_open();
 }
 
 /* write to /proc entries to enable/disable Linux ip forwarding(routing) */
 void
-l3portd_config_iprouting(int enable)
+portd_config_iprouting(int enable)
 {
     int fd = -1, nbytes = 0;
     char buf[16];
@@ -401,13 +401,13 @@ l3portd_config_iprouting(int enable)
 
 /* return ipv4/ipv6 prefix and prefix length */
 static int
-l3portd_get_prefix(int family, char *ip_address, void *prefix,
-                   unsigned char *prefixlen)
+portd_get_prefix(int family, char *ip_address, void *prefix,
+                 unsigned char *prefixlen)
 {
     char *p;
     char *ip_address_copy;
-    int maxlen = (family == AF_INET) ? L3PORTD_IPV4_MAX_LEN :
-                                       L3PORTD_IPV6_MAX_LEN;
+    int maxlen = (family == AF_INET) ? PORTD_IPV4_MAX_LEN :
+                                       PORTD_IPV6_MAX_LEN;
     *prefixlen = maxlen;
 
     /*
@@ -457,8 +457,8 @@ l3portd_get_prefix(int family, char *ip_address, void *prefix,
 
 /* Set IP address on Linux interface using netlink sockets */
 static void
-l3portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
-                   int family, bool secondary)
+portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
+                 int family, bool secondary)
 {
     int buflen;
     struct rtattr *rta;
@@ -487,13 +487,13 @@ l3portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
         return;
     }
     if (family == AF_INET) {
-        if (l3portd_get_prefix(AF_INET, ip_address, &ipv4, &prefixlen) == -1) {
+        if (portd_get_prefix(AF_INET, ip_address, &ipv4, &prefixlen) == -1) {
             VLOG_ERR("Unable to get prefix info for '%s'", ip_address);
             return;
         }
         ipaddr = (unsigned char *)&ipv4;
     } else if (family == AF_INET6) {
-        if (l3portd_get_prefix(AF_INET6, ip_address, &ipv6, &prefixlen) == -1) {
+        if (portd_get_prefix(AF_INET6, ip_address, &ipv6, &prefixlen) == -1) {
             VLOG_ERR("Unable to get prefix info for '%s'", ip_address);
             return;
         }
@@ -530,7 +530,7 @@ l3portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
 }
 
 static struct net_address *
-l3portd_ip6_addr_find(struct port *cfg, const char *address)
+portd_ip6_addr_find(struct port *cfg, const char *address)
 {
     struct net_address *addr;
 
@@ -545,7 +545,7 @@ l3portd_ip6_addr_find(struct port *cfg, const char *address)
 }
 
 static struct net_address *
-l3portd_ip4_addr_find(struct port *cfg, const char *address)
+portd_ip4_addr_find(struct port *cfg, const char *address)
 {
     struct net_address *addr;
 
@@ -563,8 +563,8 @@ l3portd_ip4_addr_find(struct port *cfg, const char *address)
  * Delete secondary v6 addresses from Linux that got deleted.
  */
 static void
-l3portd_config_secondary_ipv6_addr(struct port *port,
-                                       struct ovsrec_port *port_row)
+portd_config_secondary_ipv6_addr(struct port *port,
+                                 struct ovsrec_port *port_row)
 {
     struct shash new_ip6_list;
     struct net_address *addr, *next;
@@ -590,7 +590,7 @@ l3portd_config_secondary_ipv6_addr(struct port *port,
     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &port->secondary_ip6addr) {
         if (!shash_find_data(&new_ip6_list, addr->address)) {
             hmap_remove(&port->secondary_ip6addr, &addr->addr_node);
-            l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET6, true);
+            portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET6, true);
             free(addr->address);
             free(addr);
         }
@@ -602,7 +602,7 @@ l3portd_config_secondary_ipv6_addr(struct port *port,
     SHASH_FOR_EACH (addr_node, &new_ip6_list) {
         struct net_address *addr;
         const char *address = addr_node->data;
-        if (!l3portd_ip6_addr_find(port, address)) {
+        if (!portd_ip6_addr_find(port, address)) {
             /*
              * Add the new address to the list
              */
@@ -610,7 +610,7 @@ l3portd_config_secondary_ipv6_addr(struct port *port,
             addr->address = xstrdup(address);
             hmap_insert(&port->secondary_ip6addr, &addr->addr_node,
                         hash_string(addr->address, 0));
-            l3portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET6, true);
+            portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET6, true);
         }
     }
 }
@@ -620,8 +620,8 @@ l3portd_config_secondary_ipv6_addr(struct port *port,
  * Delete secondary v4 addresses from Linux that got deleted from db.
  */
 static void
-l3portd_config_secondary_ipv4_addr(struct port *port,
-                                   struct ovsrec_port *port_row)
+portd_config_secondary_ipv4_addr(struct port *port,
+                                 struct ovsrec_port *port_row)
 {
     struct shash new_ip_list;
     struct net_address *addr, *next;
@@ -647,7 +647,7 @@ l3portd_config_secondary_ipv4_addr(struct port *port,
     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &port->secondary_ip4addr) {
         if (!shash_find_data(&new_ip_list, addr->address)) {
             hmap_remove(&port->secondary_ip4addr, &addr->addr_node);
-            l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, true);
+            portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, true);
             free(addr->address);
             free(addr);
         }
@@ -659,7 +659,7 @@ l3portd_config_secondary_ipv4_addr(struct port *port,
     SHASH_FOR_EACH (addr_node, &new_ip_list) {
         struct net_address *addr;
         const char *address = addr_node->data;
-        if (!l3portd_ip4_addr_find(port, address)) {
+        if (!portd_ip4_addr_find(port, address)) {
             /*
              * Add the new address to the list
              */
@@ -667,7 +667,7 @@ l3portd_config_secondary_ipv4_addr(struct port *port,
             addr->address = xstrdup(address);
             hmap_insert(&port->secondary_ip4addr, &addr->addr_node,
                         hash_string(addr->address, 0));
-            l3portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET, true);
+            portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET, true);
         }
     }
 }
@@ -676,7 +676,7 @@ l3portd_config_secondary_ipv4_addr(struct port *port,
  * This function adds ipv4 address on a given port to kernel.
  */
 void
-l3portd_add_ipv4_addr(struct port *port)
+portd_add_ipv4_addr(struct port *port)
 {
     struct net_address *addr, *next_addr;
 
@@ -687,12 +687,11 @@ l3portd_add_ipv4_addr(struct port *port)
     }
 
     if (port->ip4_address) {
-        l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address, AF_INET,
-                           false);
+        portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address, AF_INET, false);
     }
 
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip4addr) {
-        l3portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET, true);
+        portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET, true);
     }
 }
 
@@ -700,7 +699,7 @@ l3portd_add_ipv4_addr(struct port *port)
  * This function adds ipv6 address on a given port to kernel.
  */
 void
-l3portd_add_ipv6_addr(struct port *port)
+portd_add_ipv6_addr(struct port *port)
 {
     struct net_address *addr, *next_addr;
 
@@ -711,12 +710,11 @@ l3portd_add_ipv6_addr(struct port *port)
     }
 
     if (port->ip6_address) {
-        l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address, AF_INET6,
-                           false);
+        portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address, AF_INET6, false);
     }
 
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip6addr) {
-        l3portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET6, true);
+        portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET6, true);
     }
 }
 
@@ -724,17 +722,17 @@ l3portd_add_ipv6_addr(struct port *port)
  * This functionn adds both ipv4 and ipv6 addresses on a given port to kernel
  */
 void
-l3portd_add_ipaddr(struct port *port)
+portd_add_ipaddr(struct port *port)
 {
-    l3portd_add_ipv4_addr(port);
-    l3portd_add_ipv6_addr(port);
+    portd_add_ipv4_addr(port);
+    portd_add_ipv6_addr(port);
 }
 
 /**
  * This function deletes ipv4 address on a given port from kernel
  */
 void
-l3portd_del_ipv4_addr(struct port *port)
+portd_del_ipv4_addr(struct port *port)
 {
     struct net_address *addr, *next_addr;
 
@@ -745,12 +743,11 @@ l3portd_del_ipv4_addr(struct port *port)
     }
 
     if (port->ip4_address) {
-        l3portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address, AF_INET,
-                           false);
+        portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address, AF_INET, false);
     }
 
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip4addr) {
-        l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, true);
+        portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, true);
     }
 }
 
@@ -758,7 +755,7 @@ l3portd_del_ipv4_addr(struct port *port)
  * This function deletes ipv6 address on a given port from kernel
  */
 void
-l3portd_del_ipv6_addr(struct port *port)
+portd_del_ipv6_addr(struct port *port)
 {
     struct net_address *addr, *next_addr;
 
@@ -769,12 +766,11 @@ l3portd_del_ipv6_addr(struct port *port)
     }
 
     if (port->ip6_address) {
-        l3portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address, AF_INET6,
-                           false);
+        portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address, AF_INET6, false);
     }
 
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip6addr) {
-        l3portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET6, true);
+        portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET6, true);
     }
 }
 
@@ -783,15 +779,15 @@ l3portd_del_ipv6_addr(struct port *port)
  * from kernel
  */
 void
-l3portd_del_ipaddr(struct port *port)
+portd_del_ipaddr(struct port *port)
 {
-    l3portd_del_ipv4_addr(port);
-    l3portd_del_ipv6_addr(port);
+    portd_del_ipv4_addr(port);
+    portd_del_ipv6_addr(port);
 }
 
 /* Take care of add/delete/modify of v4/v6 address from db */
 void
-l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
+portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
 {
     /*
      * Configure primary network addresses
@@ -799,39 +795,39 @@ l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
     if (port_row->ip4_address) {
         if (port->ip4_address) {
             if (strcmp(port->ip4_address, port_row->ip4_address) != 0) {
-                l3portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address,
-                                   AF_INET, false);
+                portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address,
+                                 AF_INET, false);
                 /*
                  * Delete the old route
                  */
-                l3portd_del_connected_route(port->ip4_address, port->name, true);
+                portd_del_connected_route(port->ip4_address, port->name, true);
                 free(port->ip4_address);
 
                 port->ip4_address = xstrdup(port_row->ip4_address);
-                l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address,
-                                   AF_INET, false);
+                portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address,
+                                 AF_INET, false);
                 /*
                  * Add the new route
                  */
-                l3portd_add_connected_route(port_row, true);
+                portd_add_connected_route(port_row, true);
             }
         } else {
             port->ip4_address = xstrdup(port_row->ip4_address);
-            l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address,
-                               AF_INET, false);
+            portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address,
+                             AF_INET, false);
             /*
              * Add a new route
              */
-            l3portd_add_connected_route(port_row, true);
+            portd_add_connected_route(port_row, true);
         }
     } else {
         if (port->ip4_address != NULL) {
-            l3portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address,
-                               AF_INET, false);
+            portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address,
+                             AF_INET, false);
             /*
              * Delete the route
              */
-            l3portd_del_connected_route(port->ip4_address, port->name, true);
+            portd_del_connected_route(port->ip4_address, port->name, true);
             free(port->ip4_address);
             port->ip4_address = NULL;
         }
@@ -840,39 +836,39 @@ l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
     if (port_row->ip6_address) {
         if (port->ip6_address) {
             if (strcmp(port->ip6_address, port_row->ip6_address) !=0) {
-                l3portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address,
-                                   AF_INET6, false);
+                portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address,
+                                 AF_INET6, false);
                 /*
                  * Delete the old route
                  */
-                l3portd_del_connected_route(port->ip6_address, port->name, false);
+                portd_del_connected_route(port->ip6_address, port->name, false);
                 free(port->ip6_address);
 
                 port->ip6_address = xstrdup(port_row->ip6_address);
-                l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address,
-                                   AF_INET6, false);
+                portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address,
+                                 AF_INET6, false);
                 /*
                  * Add the new route
                  */
-                l3portd_add_connected_route(port_row, false);
+                portd_add_connected_route(port_row, false);
             }
         } else {
             port->ip6_address = xstrdup(port_row->ip6_address);
-            l3portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address,
-                               AF_INET6, false);
+            portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address,
+                             AF_INET6, false);
             /*
              * Add the new route
              */
-            l3portd_add_connected_route(port_row, false);
+            portd_add_connected_route(port_row, false);
         }
     } else {
         if (port->ip6_address != NULL) {
-            l3portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address,
-                               AF_INET6, false);
+            portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address,
+                             AF_INET6, false);
             /*
              * Delete the route
              */
-            l3portd_del_connected_route(port->ip6_address, port->name, false);
+            portd_del_connected_route(port->ip6_address, port->name, false);
             free(port->ip6_address);
             port->ip6_address = NULL;
         }
@@ -884,13 +880,13 @@ l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
     if (OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_port_col_ip4_address_secondary,
                                       idl_seqno) ) {
         VLOG_DBG("ip4_address_secondary modified");
-        l3portd_config_secondary_ipv4_addr(port, port_row);
+        portd_config_secondary_ipv4_addr(port, port_row);
     }
 
     if (OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_port_col_ip6_address_secondary,
                                       idl_seqno) ) {
         VLOG_DBG("ip6_address_secondary modified");
-        l3portd_config_secondary_ipv6_addr(port, port_row);
+        portd_config_secondary_ipv6_addr(port, port_row);
     }
 
 }

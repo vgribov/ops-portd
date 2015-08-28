@@ -14,10 +14,10 @@
  *   License for the specific language governing permissions and limitations
  *   under the License.
  *
- * File: l3portd.c
+ * File: portd.c
  */
 
-/* This daemon handles L3 functionality including:
+/* This daemon handles the following functionality:
  * - Allocating internal VLAN for L3 interface.
  * - Configuring IP address for L3 interface.
  * - Enable/disable IP routing
@@ -33,6 +33,11 @@
 #include <err.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 
 /* OVSDB Includes */
 #include "config.h"
@@ -52,24 +57,25 @@
 #include "hash.h"
 #include "svec.h"
 
-#include "l3portd.h"
+#include "portd.h"
 
-VLOG_DEFINE_THIS_MODULE(l3portd);
-COVERAGE_DEFINE(l3portd_reconfigure);
+VLOG_DEFINE_THIS_MODULE(portd);
+COVERAGE_DEFINE(portd_reconfigure);
 
+extern int nl_ip_sock;
 unsigned int idl_seqno;
 struct ovsdb_idl *idl;
 struct ovsdb_idl_txn *txn;
 bool commit_txn = false;
 
-static unixctl_cb_func l3portd_unixctl_dump;
+static unixctl_cb_func portd_unixctl_dump;
 static int system_configured = false;
 
 /* All vrfs, indexed by name. */
 static struct hmap all_vrfs = HMAP_INITIALIZER(&all_vrfs);
 
 static inline void
-l3portd_chk_for_system_configured(void)
+portd_chk_for_system_configured(void)
 {
     const struct ovsrec_open_vswitch *ovs_vsw = NULL;
 
@@ -98,11 +104,11 @@ l3portd_chk_for_system_configured(void)
  * When Interface transitions its admin state.
  */
 static void
-l3portd_init(const char *remote)
+portd_init(const char *remote)
 {
     idl = ovsdb_idl_create(remote, &ovsrec_idl_class, false, true);
     idl_seqno = ovsdb_idl_get_seqno(idl);
-    ovsdb_idl_set_lock(idl, "halon_l3portd");
+    ovsdb_idl_set_lock(idl, "halon_portd");
     ovsdb_idl_verify_write_only(idl);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_subsystem);
@@ -141,6 +147,7 @@ l3portd_init(const char *remote)
     ovsdb_idl_add_table(idl, &ovsrec_table_interface);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_name);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_admin_state);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_user_config);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_vlan);
     ovsdb_idl_add_column(idl, &ovsrec_vlan_col_name);
@@ -182,21 +189,21 @@ l3portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_route_col_selected);
     ovsdb_idl_omit_alert(idl, &ovsrec_route_col_selected);
 
-    unixctl_command_register("l3portd/dump", "", 0, 0,
-                             l3portd_unixctl_dump, NULL);
+    unixctl_command_register("portd/dump", "", 0, 0,
+                             portd_unixctl_dump, NULL);
 
-    l3portd_init_ipcfg();
+    portd_init_ipcfg();
 }
 
 static void
-l3portd_exit(void)
+portd_exit(void)
 {
-    l3portd_exit_ipcfg();
+    portd_exit_ipcfg();
     ovsdb_idl_destroy(idl);
 }
 
 static struct vrf*
-l3portd_vrf_lookup(const char *name)
+portd_vrf_lookup(const char *name)
 {
     struct vrf *vrf;
 
@@ -210,7 +217,7 @@ l3portd_vrf_lookup(const char *name)
 
 /* delete internal port cache */
 static void
-l3portd_port_destroy(struct port *port)
+portd_port_destroy(struct port *port)
 {
     if (port) {
         struct vrf *vrf = port->vrf;
@@ -246,7 +253,7 @@ l3portd_port_destroy(struct port *port)
 
 /* delete vlan from VLAN table in DB */
 static void
-l3portd_bridge_del_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
+portd_bridge_del_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
 {
     struct ovsrec_vlan **vlans;
     size_t i, n;
@@ -264,7 +271,7 @@ l3portd_bridge_del_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
 }
 
 static void
-l3portd_del_internal_vlan(int internal_vid)
+portd_del_internal_vlan(int internal_vid)
 {
     int i;
     struct ovsrec_vlan *vlan = NULL;
@@ -278,7 +285,7 @@ l3portd_del_internal_vlan(int internal_vid)
             for (i = 0; i < br_row->n_vlans; i++) {
                 if (internal_vid == br_row->vlans[i]->id) {
                     vlan = br_row->vlans[i];
-                    l3portd_bridge_del_vlan((struct ovsrec_bridge *)br_row, vlan);
+                    portd_bridge_del_vlan((struct ovsrec_bridge *)br_row, vlan);
                 }
             }
         }
@@ -291,7 +298,7 @@ l3portd_del_internal_vlan(int internal_vid)
  * within the 'vrf', then this function will return 'NULL'.
  */
 static struct port*
-l3portd_port_lookup(const struct vrf *vrf, const char *name)
+portd_port_lookup(const struct vrf *vrf, const char *name)
 {
     struct port *port;
 
@@ -314,7 +321,7 @@ l3portd_port_lookup(const struct vrf *vrf, const char *name)
 
 /* delete vrf from cache */
 static void
-l3portd_vrf_del(struct vrf *vrf)
+portd_vrf_del(struct vrf *vrf)
 {
     if (vrf) {
         /* Delete all the associated ports before destroying vrf */
@@ -323,9 +330,9 @@ l3portd_vrf_del(struct vrf *vrf)
         VLOG_DBG("Deleting vrf '%s'",vrf->name);
 
         HMAP_FOR_EACH_SAFE (port, next_port, port_node, &vrf->ports) {
-            l3portd_del_internal_vlan(port->internal_vid);
-            l3portd_del_ipaddr(port);
-            l3portd_port_destroy(port);
+            portd_del_internal_vlan(port->internal_vid);
+            portd_del_ipaddr(port);
+            portd_port_destroy(port);
         }
         hmap_remove(&all_vrfs, &vrf->node);
         hmap_destroy(&vrf->ports);
@@ -336,11 +343,11 @@ l3portd_vrf_del(struct vrf *vrf)
 
 /* add vrf into cache */
 static void
-l3portd_vrf_add(const struct ovsrec_vrf *vrf_row)
+portd_vrf_add(const struct ovsrec_vrf *vrf_row)
 {
     struct vrf *vrf;
 
-    ovs_assert(!l3portd_vrf_lookup(vrf_row->name));
+    ovs_assert(!portd_vrf_lookup(vrf_row->name));
     vrf = xzalloc(sizeof *vrf);
 
     vrf->name = xstrdup(vrf_row->name);
@@ -353,7 +360,7 @@ l3portd_vrf_add(const struct ovsrec_vrf *vrf_row)
 }
 
 static void
-l3portd_add_del_vrf(void)
+portd_add_del_vrf(void)
 {
     struct vrf *vrf, *next;
     struct shash new_vrfs;
@@ -369,21 +376,98 @@ l3portd_add_del_vrf(void)
     HMAP_FOR_EACH_SAFE (vrf, next, node, &all_vrfs) {
         vrf->cfg = shash_find_data(&new_vrfs, vrf->name);
         if (!vrf->cfg) {
-            l3portd_vrf_del(vrf);
-            l3portd_config_iprouting(L3PORTD_DISABLE_ROUTING);
+            portd_vrf_del(vrf);
+            portd_config_iprouting(PORTD_DISABLE_ROUTING);
         }
     }
 
     /* Add new vrfs. */
     OVSREC_VRF_FOR_EACH (vrf_row, idl) {
-        struct vrf *vrf = l3portd_vrf_lookup(vrf_row->name);
+        struct vrf *vrf = portd_vrf_lookup(vrf_row->name);
         if (!vrf) {
-            l3portd_vrf_add(vrf_row);
-            l3portd_config_iprouting(L3PORTD_ENABLE_ROUTING);
+            portd_vrf_add(vrf_row);
+            portd_config_iprouting(PORTD_ENABLE_ROUTING);
         }
     }
 
     shash_destroy(&new_vrfs);
+}
+
+static int
+portd_change_if_state (const char *ifname, bool intf_up)
+{
+    struct ifreq ifr;
+
+    int rc;
+    struct {
+        struct nlmsghdr n;
+        struct ifinfomsg ifi;
+        char buf[128];
+    } req;
+
+    memset(&req, 0, sizeof(req));
+
+    /*
+     * HALON_TODO: Convert the ioctl to netlink socket
+     * messages to read the flags before writing it
+     * back to the kernel
+     */
+    ioctl(nl_ip_sock, SIOCGIFFLAGS, &ifr);
+
+    req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+    req.n.nlmsg_type = RTM_SETLINK;
+    req.n.nlmsg_flags = NLM_F_REQUEST;
+
+    req.ifi.ifi_family = AF_UNSPEC;
+    req.ifi.ifi_index = if_nametoindex(ifname);
+    if (intf_up == true) {
+        req.ifi.ifi_flags = ifr.ifr_flags | IFF_UP;
+    } else {
+        req.ifi.ifi_flags = ifr.ifr_flags & ~IFF_UP;
+    }
+    req.ifi.ifi_change = 0xffffffff;
+
+    req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len);
+
+    if (req.n.nlmsg_len > sizeof(req)) {
+        VLOG_ERR("Message length (%d) exceeded max (%d)",
+                 req.n.nlmsg_len, (int)sizeof(req));
+    }
+
+    rc = send(nl_ip_sock, &req, req.n.nlmsg_len, 0);
+    if (rc < 0) {
+        VLOG_ERR("Error sending interface state message");
+    }
+    return rc;
+}
+
+static void
+portd_process_interface_admin_up_down_events (void)
+{
+    const struct ovsrec_interface *interface_row = NULL;
+    bool int_up = false;
+    struct smap user_config;
+    const char *admin_status;
+
+    if (OVSREC_IDL_IS_COLUMN_MODIFIED(
+               ovsrec_interface_col_user_config, idl_seqno)) {
+        OVSREC_INTERFACE_FOR_EACH (interface_row, idl) {
+            if (OVSREC_IDL_IS_ROW_MODIFIED(interface_row, idl_seqno)) {
+                smap_clone(&user_config, &interface_row->user_config);
+                admin_status = smap_get(&user_config, INTERFACE_USER_CONFIG_MAP_ADMIN);
+
+                if (admin_status != NULL &&
+                    !strcmp(admin_status, OVSREC_INTERFACE_USER_CONFIG_ADMIN_UP)) {
+                    int_up = true;
+                }
+
+                smap_destroy(&user_config);
+
+                portd_change_if_state(interface_row->name, int_up);
+            }
+        }
+    }
+
 }
 
 /**
@@ -400,7 +484,7 @@ l3portd_add_del_vrf(void)
  *    port.
  */
 static void
-l3portd_process_interace_up_down_events(void)
+portd_process_interace_up_down_events(void)
 {
     const struct ovsrec_interface *interface_row = NULL;
     struct vrf* vrf;
@@ -442,7 +526,7 @@ l3portd_process_interace_up_down_events(void)
                 port = NULL;
                 HMAP_FOR_EACH (vrf, node, &all_vrfs) {
 
-                    port = l3portd_port_lookup(vrf, interface_row->name);
+                    port = portd_port_lookup(vrf, interface_row->name);
 
                     /*
                      * If a valid port structure is found, the break.
@@ -459,20 +543,20 @@ l3portd_process_interace_up_down_events(void)
 
                     /*
                      * If the interface event is administratively forced to,
-                     * 'L3PORT_INTERFACE_ADMIN_UP' reprogram the primary
+                     * 'PORT_INTERFACE_ADMIN_UP' reprogram the primary
                      * port address and all the secondary port addresses
                      * on the port. This needs to be done for IPv6 since
                      * the IPv6 addresses get deleted from the kernel when
                      * the kernel interface is administratively forced
-                     * 'L3PORT_INTERFACE_ADMIN_DOWN'.
+                     * 'PORT_INTERFACE_ADMIN_DOWN'.
                      */
                     if (strcmp(interface_row->admin_state,
-                               L3PORT_INTERFACE_ADMIN_UP) == 0) {
+                               PORT_INTERFACE_ADMIN_UP) == 0) {
 
                         VLOG_DBG("Reprogramming the IPv6 address again since "
                                  "the interface is forced up again");
 
-                        l3portd_add_ipv6_addr(port);
+                        portd_add_ipv6_addr(port);
                     }
                 }
             }
@@ -482,7 +566,7 @@ l3portd_process_interace_up_down_events(void)
 
 /* collect the ports from the current config in db */
 static void
-l3portd_collect_wanted_ports(struct vrf *vrf,
+portd_collect_wanted_ports(struct vrf *vrf,
                              struct shash *wanted_ports)
 {
     size_t i;
@@ -497,7 +581,7 @@ l3portd_collect_wanted_ports(struct vrf *vrf,
 
 /* remove the ports that are in local cache and not in db */
 static void
-l3portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
+portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
 {
     struct port *port, *next;
 
@@ -505,16 +589,16 @@ l3portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
         port->cfg = shash_find_data(wanted_ports, port->name);
         if (!port->cfg) {
             /* Port not present in the wanted_ports list. Destroy */
-            l3portd_del_internal_vlan(port->internal_vid);
-            l3portd_del_ipaddr(port);
-            l3portd_port_destroy(port);
+            portd_del_internal_vlan(port->internal_vid);
+            portd_del_ipaddr(port);
+            portd_port_destroy(port);
         }
     }
 }
 
 /* create port in cache */
 static void
-l3portd_port_create(struct vrf *vrf, struct ovsrec_port *port_row)
+portd_port_create(struct vrf *vrf, struct ovsrec_port *port_row)
 {
     struct port *port;
 
@@ -534,7 +618,7 @@ l3portd_port_create(struct vrf *vrf, struct ovsrec_port *port_row)
 
 /* HALON_TODO - update port table status column with error if no VLAN allocated. */
 static int
-l3portd_alloc_internal_vlan(void)
+portd_alloc_internal_vlan(void)
 {
     int i, ret = -1;
     const struct ovsrec_bridge *br_row = NULL;
@@ -622,7 +706,7 @@ l3portd_alloc_internal_vlan(void)
 
 /* add new vlan row into db */
 static void
-l3portd_bridge_insert_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
+portd_bridge_insert_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
 {
     struct ovsrec_vlan **vlans;
     size_t i;
@@ -639,7 +723,7 @@ l3portd_bridge_insert_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
 
 /* create a new internal vlan row to be inserted into db */
 static void
-l3portd_create_vlan_row(int vid, struct ovsrec_port *port_row)
+portd_create_vlan_row(int vid, struct ovsrec_port *port_row)
 {
     char vlan_name[16];
     struct smap vlan_internal_smap;
@@ -664,14 +748,14 @@ l3portd_create_vlan_row(int vid, struct ovsrec_port *port_row)
     OVSREC_BRIDGE_FOR_EACH (br_row, idl) {
         if (!strcmp(br_row->name, DEFAULT_BRIDGE_NAME)) {
             VLOG_DBG("Creating VLAN row '%s'", vlan_name);
-            l3portd_bridge_insert_vlan((struct ovsrec_bridge *)br_row, vlan);
+            portd_bridge_insert_vlan((struct ovsrec_bridge *)br_row, vlan);
         }
     }
 }
 
 /* HALON_TODO - move internal_vlan functions to a separate file */
 static void
-l3portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
+portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
 {
     int vid;
     char vlan_id[16];
@@ -695,13 +779,13 @@ l3portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
         return;
     }
 
-    vid = l3portd_alloc_internal_vlan();
+    vid = portd_alloc_internal_vlan();
     if (vid == -1) {
         VLOG_ERR("Error allocating internal vlan for port '%s'", port_row->name);
         return;
     }
 
-    l3portd_create_vlan_row(vid, port_row);
+    portd_create_vlan_row(vid, port_row);
 
     /* update port table "hw_config" with the generated vlan id */
     smap_init(&hw_cfg_smap);
@@ -718,26 +802,26 @@ l3portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
 }
 
 static void
-l3portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
+portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
 {
     struct shash_node *port_node;
 
     SHASH_FOR_EACH (port_node, wanted_ports) {
         struct ovsrec_port *port_row = port_node->data;
-        struct port *port = l3portd_port_lookup(vrf, port_row->name);
+        struct port *port = portd_port_lookup(vrf, port_row->name);
         if (!port) {
 
             VLOG_DBG("Creating new port %s vrf %s\n",port_row->name, vrf->name);
-            l3portd_port_create(vrf, port_row);
-            port = l3portd_port_lookup(vrf, port_row->name);
+            portd_port_create(vrf, port_row);
+            port = portd_port_lookup(vrf, port_row->name);
 
-            l3portd_add_internal_vlan(port, port_row);
+            portd_add_internal_vlan(port, port_row);
 
-            l3portd_reconfig_ipaddr(port, port_row);
+            portd_reconfig_ipaddr(port, port_row);
             VLOG_DBG("Port has IP: %s vrf %s\n", port_row->ip4_address,
                       vrf->name);
         } else if ((port) && OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) {
-            l3portd_reconfig_ipaddr(port, port_row);
+            portd_reconfig_ipaddr(port, port_row);
             /* Port table row modified */
             VLOG_DBG("Port modified IP: %s vrf %s\n", port_row->ip4_address,
                      vrf->name);
@@ -746,20 +830,20 @@ l3portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
 }
 
 static void
-l3portd_add_del_ports(void)
+portd_add_del_ports(void)
 {
     struct vrf *vrf;
 
     /* For each vrf in all_vrfs, update the port list */
     HMAP_FOR_EACH (vrf, node, &all_vrfs) {
         VLOG_DBG("in vrf %s to delete ports\n",vrf->name);
-        l3portd_collect_wanted_ports(vrf, &vrf->wanted_ports);
-        l3portd_del_ports(vrf, &vrf->wanted_ports);
+        portd_collect_wanted_ports(vrf, &vrf->wanted_ports);
+        portd_del_ports(vrf, &vrf->wanted_ports);
     }
     /* For each vrfs' port list, configure them */
     HMAP_FOR_EACH (vrf, node, &all_vrfs) {
         VLOG_DBG("in vrf %s to reconfigure ports\n",vrf->name);
-        l3portd_reconfig_ports(vrf, &vrf->wanted_ports);
+        portd_reconfig_ports(vrf, &vrf->wanted_ports);
         shash_destroy(&vrf->wanted_ports);
     }
 }
@@ -770,7 +854,7 @@ l3portd_add_del_ports(void)
  * port has been modified (IP address(es)).
  */
 static void
-l3portd_reconfigure(void)
+portd_reconfigure(void)
 {
     unsigned int new_idl_seqno = ovsdb_idl_get_seqno(idl);
 
@@ -782,16 +866,17 @@ l3portd_reconfigure(void)
         return;
     }
 
-    l3portd_add_del_vrf();
-    l3portd_add_del_ports();
-    l3portd_process_interace_up_down_events();
+    portd_add_del_vrf();
+    portd_add_del_ports();
+    portd_process_interace_up_down_events();
+    portd_process_interface_admin_up_down_events();
 
     idl_seqno = new_idl_seqno; /* This has to be done after all changes are done */
     return;
 }
 
 static void
-l3portd_run(void)
+portd_run(void)
 {
 
     ovsdb_idl_run(idl);
@@ -799,7 +884,7 @@ l3portd_run(void)
     if (ovsdb_idl_is_lock_contended(idl)) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
 
-        VLOG_ERR_RL(&rl, "another halon-l3portd process is running, "
+        VLOG_ERR_RL(&rl, "another halon-portd process is running, "
                     "disabling this process until it goes away");
 
         return;
@@ -807,35 +892,35 @@ l3portd_run(void)
         return;
     }
 
-    l3portd_chk_for_system_configured();
+    portd_chk_for_system_configured();
     if (!system_configured) {
         return;
     }
 
     commit_txn = false; /* if db was modified, this flag gets set */
     txn = ovsdb_idl_txn_create(idl);
-    l3portd_reconfigure();
+    portd_reconfigure();
     if (commit_txn) {
         ovsdb_idl_txn_commit_block(txn);
     }
     ovsdb_idl_txn_destroy(txn);
-    VLOG_INFO_ONCE("%s (Halon l3portd) %s", program_name, VERSION);
+    VLOG_INFO_ONCE("%s (Halon portd) %s", program_name, VERSION);
 
     /* HALON_TODO - verify db write was successful, else retry. */
-    /* HALON_TODO - restartability of l3portd, ovsdb */
+    /* HALON_TODO - restartability of portd, ovsdb */
     /* HALON_TODO - cur_cfg delete once after system init */
 }
 
 static void
-l3portd_wait(void)
+portd_wait(void)
 {
     ovsdb_idl_wait(idl);
-    poll_timer_wait(L3PORTD_POLL_INTERVAL * 1000);
+    poll_timer_wait(PORTD_POLL_INTERVAL * 1000);
 }
 
 static void
-l3portd_unixctl_dump(struct unixctl_conn *conn, int argc OVS_UNUSED,
-        const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
+portd_unixctl_dump(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                   const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
 {
     unixctl_command_reply_error(conn, "Nothing to dump :)");
 }
@@ -843,7 +928,7 @@ l3portd_unixctl_dump(struct unixctl_conn *conn, int argc OVS_UNUSED,
 static void
 usage(void)
 {
-    printf("%s: Halon l3portd daemon\n"
+    printf("%s: Halon portd daemon\n"
             "usage: %s [OPTIONS] [DATABASE]\n"
             "where DATABASE is a socket on which ovsdb-server is listening\n"
             "      (default: \"unix:%s/db.sock\").\n",
@@ -928,7 +1013,7 @@ parse_options(int argc, char *argv[], char **unixctl_pathp)
 }
 
 static void
-halon_l3portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
+halon_portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
         const char *argv[] OVS_UNUSED, void *exiting_)
 {
     bool *exiting = exiting_;
@@ -958,19 +1043,19 @@ main(int argc, char *argv[])
     if (retval) {
         exit(EXIT_FAILURE);
     }
-    unixctl_command_register("exit", "", 0, 0, halon_l3portd_exit, &exiting);
+    unixctl_command_register("exit", "", 0, 0, halon_portd_exit, &exiting);
 
-    l3portd_init(remote);
+    portd_init(remote);
     free(remote);
     daemonize_complete();
     vlog_enable_async();
 
     exiting = false;
     while (!exiting) {
-        l3portd_run();
+        portd_run();
         unixctl_server_run(unixctl);
 
-        l3portd_wait();
+        portd_wait();
         unixctl_server_wait(unixctl);
         if (exiting) {
             poll_immediate_wake();
@@ -978,7 +1063,7 @@ main(int argc, char *argv[])
             poll_block();
         }
     }
-    l3portd_exit();
+    portd_exit();
     unixctl_server_destroy(unixctl);
 
     return 0;
