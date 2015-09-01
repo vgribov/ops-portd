@@ -14,23 +14,23 @@
  *   License for the specific language governing permissions and limitations
  *   under the License.
  *
- * File: l3portd.h
+ * File: portd.h
  */
 
-#ifndef L3PORTD_H_
-#define L3PORTD_H_
+#ifndef PORTD_H_
+#define PORTD_H_
 
 #include "hmap.h"
 #include "shash.h"
 #include "vswitch-idl.h"
 
-#define L3PORTD_DISABLE_ROUTING 0
-#define L3PORTD_ENABLE_ROUTING 1
-#define L3PORTD_POLL_INTERVAL 5
-#define L3PORTD_IPV4_MAX_LEN 32
-#define L3PORTD_IPV6_MAX_LEN 128
-#define L3PORT_INTERFACE_ADMIN_UP "up" // Interface admin state "up"
-#define L3PORT_INTERFACE_ADMIN_DOWN "down" // Interface admin state "down"
+#define PORTD_DISABLE_ROUTING 0
+#define PORTD_ENABLE_ROUTING 1
+#define PORTD_POLL_INTERVAL 5
+#define PORTD_IPV4_MAX_LEN 32
+#define PORTD_IPV6_MAX_LEN 128
+#define PORT_INTERFACE_ADMIN_UP "up" // Interface admin state "up"
+#define PORT_INTERFACE_ADMIN_DOWN "down" // Interface admin state "down"
 
 #define INET_ADDRSTRLEN     16
 #define INET_PREFIX_SIZE    18
@@ -88,15 +88,15 @@ struct prefix_ipv6
   struct in6_addr prefix __attribute__ ((aligned (8)));
 };
 
-void l3portd_exit_ipcfg(void);
-void l3portd_init_ipcfg(void);
-void l3portd_config_iprouting(int enable);
-void l3portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row);
-void l3portd_del_ipv4_addr(struct port *port);
-void l3portd_del_ipv6_addr(struct port *port);
-void l3portd_del_ipaddr(struct port *port);
-void l3portd_add_ipv4_addr(struct port *port);
-void l3portd_add_ipv6_addr(struct port *port);
-void l3portd_add_ipaddr(struct port *port);
+void portd_exit_ipcfg(void);
+void portd_init_ipcfg(void);
+void portd_config_iprouting(int enable);
+void portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row);
+void portd_del_ipv4_addr(struct port *port);
+void portd_del_ipv6_addr(struct port *port);
+void portd_del_ipaddr(struct port *port);
+void portd_add_ipv4_addr(struct port *port);
+void portd_add_ipv6_addr(struct port *port);
+void portd_add_ipaddr(struct port *port);
 
-#endif /* L3PORTD_H_ */
+#endif /* PORTD_H_ */

@@ -15,8 +15,8 @@
 
 cmake_minimum_required (VERSION 2.8)
 
-set (L3PORTD l3portd)
-project (${L3PORTD})
+set (PORTD portd)
+project (${PORTD})
 
 
 # Rules to locate needed libraries
@@ -30,15 +30,15 @@ include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}
 
 set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror")
 
-# Source files to build l3portd
-set (SOURCES l3portd.c portd_l3.c)
+# Source files to build portd
+set (SOURCES portd.c portd_l3.c)
 
-# Rules to build l3portd
-add_executable (${L3PORTD} ${SOURCES})
-target_link_libraries (${L3PORTD} ${OVSCOMMON_LIBRARIES}
+# Rules to build portd
+add_executable (${PORTD} ${SOURCES})
+target_link_libraries (${PORTD} ${OVSCOMMON_LIBRARIES}
                        ${OVSDB_LIBRARIES}
                        -lpthread -lrt)
 
-# Rules to install l3portd binary in rootfs
-install(TARGETS ${L3PORTD}
+# Rules to install portd binary in rootfs
+install(TARGETS ${PORTD}
     RUNTIME DESTINATION bin)
