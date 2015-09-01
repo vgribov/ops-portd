@@ -30,7 +30,7 @@ class connectedRoutesCTTest( HalonTest ):
                                                  build=True)
 
     def testConfigure(self):
-        info('\n########## Test l3portd addition of connected routes ##########\n')
+        info('\n########## Test portd addition of connected routes ##########\n')
         info('\n### Configuring the topology ###\n')
         s1 = self.net.switches[ 0 ]
 
@@ -43,14 +43,12 @@ class connectedRoutesCTTest( HalonTest ):
         # Configure interface 1 on switch s1
         s1.cmdCLI("interface 1")
         s1.cmdCLI("ip address 10.0.10.1/24")
-        time.sleep(2)
         s1.cmdCLI("ipv6 address 2000::1/120")
         s1.cmdCLI("exit")
 
         # Configure interface 2 on switch s1
         s1.cmdCLI("interface 2")
         s1.cmdCLI("ip address 10.0.20.1/24")
-        time.sleep(2)
         s1.cmdCLI("ipv6 address 2001::1/120")
         s1.cmdCLI("exit")
 
@@ -103,15 +101,15 @@ class connectedRoutesCTTest( HalonTest ):
 
         info('########## Test Passed ##########\n\n\n')
 
-class Test_l3portd_connected_routes:
+class Test_portd_connected_routes:
 
     def setup_class(cls):
-        Test_l3portd_connected_routes.test = connectedRoutesCTTest()
+        Test_portd_connected_routes.test = connectedRoutesCTTest()
 
     def teardown_class(cls):
         # Stop the Docker containers, and
         # mininet topology
-        Test_l3portd_connected_routes.test.net.stop()
+        Test_portd_connected_routes.test.net.stop()
 
     def test_testConfigure(self):
         # Function to configure the topology
