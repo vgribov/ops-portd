@@ -38,6 +38,7 @@ extern unsigned int idl_seqno;
 extern struct ovsdb_idl *idl;
 extern struct ovsdb_idl_txn *txn;
 extern bool commit_txn;
+extern struct hmap all_vrfs;
 
 int nl_ip_sock;
 static int portd_get_prefix(int family, char *ip_address, void *prefix,
@@ -457,7 +458,7 @@ portd_get_prefix(int family, char *ip_address, void *prefix,
 
 /* Set IP address on Linux interface using netlink sockets */
 static void
-portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
+portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
                  int family, bool secondary)
 {
     int buflen;
@@ -481,9 +482,9 @@ portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
     req.n.nlmsg_type = cmd;
 
     req.ifa.ifa_family = family;
-    req.ifa.ifa_index = if_nametoindex(port->name);
+    req.ifa.ifa_index = if_nametoindex(port_name);
     if (req.ifa.ifa_index == 0) {
-        VLOG_ERR("Unable to get ifindex for port '%s'", port->name);
+        VLOG_ERR("Unable to get ifindex for port '%s'", port_name);
         return;
     }
     if (family == AF_INET) {
@@ -526,7 +527,7 @@ portd_set_ipaddr(int cmd, struct port *port, char *ip_address,
     VLOG_DBG("Netlink %s IP addr '%s' and mask length = %u (%s) for port '%s'",
              (cmd == RTM_NEWADDR) ? "added" : "deleted",
              ip_address, prefixlen, secondary ? "secondary":"primary",
-             port->name);
+             port_name);
 }
 
 static struct net_address *
@@ -557,6 +558,69 @@ portd_ip4_addr_find(struct port *cfg, const char *address)
     }
 
     return NULL;
+}
+
+/*
+ * This function is used to check if the given IP address is present
+ * in the list of IP addresses for a specific interface in the kernel.
+ */
+static bool
+portd_find_ip_addr_kernel(struct kernel_port *port,
+                          const char *address, bool ipv6)
+{
+    struct net_address *addr;
+
+    if (ipv6) {
+        HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
+                                     &port->ip6addr) {
+            if (!strcmp(addr->address, address)) {
+                return true;
+            }
+        }
+    } else {
+        HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
+                                     &port->ip4addr) {
+            if (!strcmp(addr->address, address)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/*
+ * This function is used to check if the given IP address is present
+ * in the list of IP addresses for a specific interface in the DB.
+ */
+static bool
+portd_find_ip_addr_db(struct port *port, const char *address, bool ipv6)
+{
+    struct net_address *addr;
+
+    if (ipv6) {
+        if (port->ip6_address && !strcmp(port->ip6_address, address)) {
+            return true;
+        }
+        HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
+                                     &port->secondary_ip6addr) {
+            if (!strcmp(addr->address, address)) {
+                return true;
+            }
+        }
+    } else {
+        if (port->ip4_address && !strcmp(port->ip4_address, address)) {
+            return true;
+        }
+        HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
+                                     &port->secondary_ip4addr) {
+            if (!strcmp(addr->address, address)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 /* Add secondary v6 address in Linux that got added.
@@ -590,7 +654,7 @@ portd_config_secondary_ipv6_addr(struct port *port,
     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &port->secondary_ip6addr) {
         if (!shash_find_data(&new_ip6_list, addr->address)) {
             hmap_remove(&port->secondary_ip6addr, &addr->addr_node);
-            portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET6, true);
+            portd_set_ipaddr(RTM_DELADDR, port->name, addr->address, AF_INET6, true);
             free(addr->address);
             free(addr);
         }
@@ -610,7 +674,7 @@ portd_config_secondary_ipv6_addr(struct port *port,
             addr->address = xstrdup(address);
             hmap_insert(&port->secondary_ip6addr, &addr->addr_node,
                         hash_string(addr->address, 0));
-            portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET6, true);
+            portd_set_ipaddr(RTM_NEWADDR, port->name, addr->address, AF_INET6, true);
         }
     }
 }
@@ -647,7 +711,7 @@ portd_config_secondary_ipv4_addr(struct port *port,
     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &port->secondary_ip4addr) {
         if (!shash_find_data(&new_ip_list, addr->address)) {
             hmap_remove(&port->secondary_ip4addr, &addr->addr_node);
-            portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, true);
+            portd_set_ipaddr(RTM_DELADDR, port->name, addr->address, AF_INET, true);
             free(addr->address);
             free(addr);
         }
@@ -667,7 +731,7 @@ portd_config_secondary_ipv4_addr(struct port *port,
             addr->address = xstrdup(address);
             hmap_insert(&port->secondary_ip4addr, &addr->addr_node,
                         hash_string(addr->address, 0));
-            portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET, true);
+            portd_set_ipaddr(RTM_NEWADDR, port->name, addr->address, AF_INET, true);
         }
     }
 }
@@ -687,11 +751,11 @@ portd_add_ipv4_addr(struct port *port)
     }
 
     if (port->ip4_address) {
-        portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address, AF_INET, false);
+        portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip4_address, AF_INET, false);
     }
 
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip4addr) {
-        portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET, true);
+        portd_set_ipaddr(RTM_NEWADDR, port->name, addr->address, AF_INET, true);
     }
 }
 
@@ -710,11 +774,11 @@ portd_add_ipv6_addr(struct port *port)
     }
 
     if (port->ip6_address) {
-        portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address, AF_INET6, false);
+        portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip6_address, AF_INET6, false);
     }
 
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip6addr) {
-        portd_set_ipaddr(RTM_NEWADDR, port, addr->address, AF_INET6, true);
+        portd_set_ipaddr(RTM_NEWADDR, port->name, addr->address, AF_INET6, true);
     }
 }
 
@@ -743,11 +807,11 @@ portd_del_ipv4_addr(struct port *port)
     }
 
     if (port->ip4_address) {
-        portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address, AF_INET, false);
+        portd_set_ipaddr(RTM_DELADDR, port->name, port->ip4_address, AF_INET, false);
     }
 
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip4addr) {
-        portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET, true);
+        portd_set_ipaddr(RTM_DELADDR, port->name, addr->address, AF_INET, true);
     }
 }
 
@@ -766,11 +830,11 @@ portd_del_ipv6_addr(struct port *port)
     }
 
     if (port->ip6_address) {
-        portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address, AF_INET6, false);
+        portd_set_ipaddr(RTM_DELADDR, port->name, port->ip6_address, AF_INET6, false);
     }
 
     HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node, &port->secondary_ip6addr) {
-        portd_set_ipaddr(RTM_DELADDR, port, addr->address, AF_INET6, true);
+        portd_set_ipaddr(RTM_DELADDR, port->name, addr->address, AF_INET6, true);
     }
 }
 
@@ -795,7 +859,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
     if (port_row->ip4_address) {
         if (port->ip4_address) {
             if (strcmp(port->ip4_address, port_row->ip4_address) != 0) {
-                portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address,
+                portd_set_ipaddr(RTM_DELADDR, port->name, port->ip4_address,
                                  AF_INET, false);
                 /*
                  * Delete the old route
@@ -804,7 +868,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
                 free(port->ip4_address);
 
                 port->ip4_address = xstrdup(port_row->ip4_address);
-                portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address,
+                portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip4_address,
                                  AF_INET, false);
                 /*
                  * Add the new route
@@ -813,7 +877,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
             }
         } else {
             port->ip4_address = xstrdup(port_row->ip4_address);
-            portd_set_ipaddr(RTM_NEWADDR, port, port->ip4_address,
+            portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip4_address,
                              AF_INET, false);
             /*
              * Add a new route
@@ -822,7 +886,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
         }
     } else {
         if (port->ip4_address != NULL) {
-            portd_set_ipaddr(RTM_DELADDR, port, port->ip4_address,
+            portd_set_ipaddr(RTM_DELADDR, port->name, port->ip4_address,
                              AF_INET, false);
             /*
              * Delete the route
@@ -836,7 +900,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
     if (port_row->ip6_address) {
         if (port->ip6_address) {
             if (strcmp(port->ip6_address, port_row->ip6_address) !=0) {
-                portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address,
+                portd_set_ipaddr(RTM_DELADDR, port->name, port->ip6_address,
                                  AF_INET6, false);
                 /*
                  * Delete the old route
@@ -845,7 +909,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
                 free(port->ip6_address);
 
                 port->ip6_address = xstrdup(port_row->ip6_address);
-                portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address,
+                portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip6_address,
                                  AF_INET6, false);
                 /*
                  * Add the new route
@@ -854,7 +918,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
             }
         } else {
             port->ip6_address = xstrdup(port_row->ip6_address);
-            portd_set_ipaddr(RTM_NEWADDR, port, port->ip6_address,
+            portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip6_address,
                              AF_INET6, false);
             /*
              * Add the new route
@@ -863,7 +927,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
         }
     } else {
         if (port->ip6_address != NULL) {
-            portd_set_ipaddr(RTM_DELADDR, port, port->ip6_address,
+            portd_set_ipaddr(RTM_DELADDR, port->name, port->ip6_address,
                              AF_INET6, false);
             /*
              * Delete the route
@@ -889,4 +953,421 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
         portd_config_secondary_ipv6_addr(port, port_row);
     }
 
+}
+
+/*
+ * This function is used to check and add a kernel interface to the
+ * kernel port list which will be used later to compare with DB list.
+ */
+static struct kernel_port *
+find_or_create_kernel_port(struct shash *kernel_port_list, const char *ifname)
+{
+    struct kernel_port *port;
+    port = shash_find_data(kernel_port_list, ifname);
+    /* For every new interface, add to kernel port list */
+    if (!port) {
+        port = xzalloc(sizeof *port);
+        port->name = xstrdup(ifname);
+        hmap_init(&port->ip4addr);
+        hmap_init(&port->ip6addr);
+    }
+    return port;
+}
+
+/*
+ * This function is used to parse the Netlink response
+ * for the dump request.
+ */
+static void
+parse_nl_msg(struct nlmsghdr *nlh, int msglen,
+             struct shash *kernel_port_list)
+{
+    struct rtattr *rta;
+    struct ifaddrmsg *ifa;
+    int rtalen;
+    char ifname[IF_NAMESIZE];
+    char recvip[INET6_ADDRSTRLEN];
+    char ip_address[INET6_PREFIX_SIZE];
+    struct kernel_port *port;
+    struct net_address *addr;
+    bool add_to_list = false;
+
+    while (NLMSG_OK(nlh, msglen)) {
+        port = NULL;
+        ifa = (struct ifaddrmsg *)NLMSG_DATA(nlh);
+        rta = (struct rtattr *)IFA_RTA(ifa);
+        rtalen = IFA_PAYLOAD(nlh);
+
+        memset(ifname, 0, sizeof(ifname));
+        if_indextoname(ifa->ifa_index, ifname);
+        VLOG_DBG("Interface = %s\n",ifname);
+
+        if(!strcmp(ifname, LOOPBACK_INTERFACE_NAME)) {
+            nlh = NLMSG_NEXT(nlh, msglen);
+            continue;
+        }
+
+        for (; RTA_OK(rta, rtalen); rta = RTA_NEXT(rta, rtalen)) {
+            memset(ip_address, 0, sizeof(ip_address));
+            if(rta->rta_type == IFA_ADDRESS){
+                memset(recvip, 0, sizeof(recvip));
+                if (ifa->ifa_family == AF_INET) {
+                    inet_ntop(AF_INET, RTA_DATA(rta), recvip,
+                            INET_ADDRSTRLEN);
+                    snprintf(ip_address, INET6_PREFIX_SIZE,
+                            "%s/%d",recvip,ifa->ifa_prefixlen);
+                    VLOG_DBG("Netlink message has IPv4 addr : %s",ip_address);
+                    port = find_or_create_kernel_port(kernel_port_list, ifname);
+                    addr = xzalloc(sizeof *addr);
+                    addr->address = xstrdup(ip_address);
+                    hmap_insert(&port->ip4addr, &addr->addr_node,
+                            hash_string(addr->address, 0));
+                    add_to_list = true;
+                } else if (ifa->ifa_family == AF_INET6) {
+                    inet_ntop(AF_INET6, RTA_DATA(rta), recvip,
+                            INET6_ADDRSTRLEN);
+                    snprintf(ip_address, INET6_PREFIX_SIZE,
+                            "%s/%d",recvip,ifa->ifa_prefixlen);
+                    if (ifa->ifa_scope == IPV6_ADDR_SCOPE_LINK) {
+                        VLOG_DBG("Link Local IPv6 address. Do nothing!");
+                        break;
+                    }
+                    VLOG_DBG("Netlink message has IPv6 addr : %s",ip_address);
+                    port = find_or_create_kernel_port(kernel_port_list, ifname);
+                    addr = xzalloc(sizeof *addr);
+                    addr->address = xstrdup(ip_address);
+                    hmap_insert(&port->ip6addr, &addr->addr_node,
+                            hash_string(addr->address, 0));
+                    add_to_list = true;
+                }
+            }
+        }
+        if (add_to_list) {
+            shash_add_once(kernel_port_list, ifname, port);
+            add_to_list = false;
+        }
+        nlh = NLMSG_NEXT(nlh, msglen);
+    }
+}
+
+/*
+ * This function is used to parse the dump command response.
+ * It handles multi part message and calls the parse_nl_msg
+ * function to act on Netlink messages.
+ */
+static void
+parse_ip_addr_dump(struct shash *kernel_port_list)
+{
+    bool multipart_msg_end = false;
+    while (!multipart_msg_end) {
+        struct sockaddr_nl nladdr;
+        struct msghdr msg;
+        struct iovec iov;
+        struct nlmsghdr *nlh;
+        char buffer[RECV_BUFFER_SIZE];
+        int ret;
+
+        iov.iov_base = (void *)buffer;
+        iov.iov_len = sizeof(buffer);
+        msg.msg_name = (void *)&(nladdr);
+        msg.msg_namelen = sizeof(nladdr);
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+
+        ret = recvmsg(nl_ip_sock, &msg, 0);
+        if (ret < 0) {
+            return;
+        }
+        nlh = (struct nlmsghdr*) buffer;
+
+        switch(nlh->nlmsg_type) {
+
+            case RTM_NEWADDR:
+                parse_nl_msg(nlh, ret, kernel_port_list);
+                break;
+
+            case NLMSG_DONE:
+                VLOG_DBG("End of multi part message");
+                multipart_msg_end = true;
+                break;
+
+            default:
+                break;
+        }
+        if (!(nlh->nlmsg_flags & NLM_F_MULTI)) {
+            VLOG_DBG("End of message. Not a multipart message");
+            break;
+        }
+    }
+    return;
+}
+
+/*
+ * This function is used to make netlink calls to dump the IP addresses
+ * from the kernel. It is called twice (IPv4 & IPv6).
+ */
+static void
+portd_populate_kernel_ip_addr(int family, struct shash *kernel_port_list)
+{
+    struct rtattr *rta;
+    int bytelen;
+    struct {
+        struct nlmsghdr n;
+        struct ifaddrmsg ifa;
+    } req;
+
+    memset (&req, 0, sizeof(req));
+
+    bytelen = (family == AF_INET ? 4 : 16);
+
+    req.n.nlmsg_len = NLMSG_LENGTH (sizeof (struct ifaddrmsg));
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+
+    req.n.nlmsg_type = RTM_GETADDR;
+
+    req.ifa.ifa_family = family;
+    rta = (struct rtattr *)(((char *)&req) + NLMSG_ALIGN(req.n.nlmsg_len));
+    rta->rta_len = RTA_LENGTH(bytelen);
+
+    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to send message for IP addr dump");
+        return;
+    }
+    VLOG_DBG("Netlink %s addr dump command sent",
+            family == AF_INET? "IPv4" : "IPv6");
+    /* Parse the dump command response */
+    parse_ip_addr_dump(kernel_port_list);
+}
+
+/*
+ * This function loops over the L3 interfaces which are attached to
+ * VRFs and makes a DB list of IP addresses for each interface.
+ */
+static void
+portd_populate_db_ip_addr(struct shash *db_port_list)
+{
+    struct port *db_port;
+    struct vrf *vrf, *next_vrf;
+    const struct ovsrec_port *port_row;
+    struct net_address *addr;
+    struct smap hw_cfg_smap;
+    int vlan_id;
+    size_t i, j, k;
+
+    HMAP_FOR_EACH_SAFE (vrf, next_vrf, node, &all_vrfs) {
+        for (i = 0; i < vrf->cfg->n_ports; i++) {
+            port_row = vrf->cfg->ports[i];
+            db_port = xzalloc(sizeof *db_port);
+            db_port->vrf = vrf;
+            db_port->name = xstrdup(port_row->name);
+            db_port->cfg = port_row;
+            smap_clone(&hw_cfg_smap, &port_row->hw_config);
+            vlan_id = smap_get_int(&hw_cfg_smap,
+                    PORT_HW_CONFIG_MAP_INTERNAL_VLAN_ID, 0);
+            if(vlan_id != 0) {
+                db_port->internal_vid = vlan_id;
+            } else {
+                db_port->internal_vid = -1;
+            }
+            smap_destroy(&hw_cfg_smap);
+            hmap_init(&db_port->secondary_ip4addr);
+            hmap_init(&db_port->secondary_ip6addr);
+            if (port_row->ip4_address) {
+                db_port->ip4_address = xstrdup(port_row->ip4_address);
+            }
+            if (port_row->ip6_address) {
+                db_port->ip6_address = xstrdup(port_row->ip6_address);
+            }
+            for(j = 0 ; j < port_row->n_ip4_address_secondary ; j++) {
+                addr = xzalloc(sizeof *addr);
+                addr->address = xstrdup(port_row->ip4_address_secondary[j]);
+                hmap_insert(&db_port->secondary_ip4addr, &addr->addr_node,
+                        hash_string(addr->address, 0));
+            }
+            for(k = 0 ; k < port_row->n_ip6_address_secondary ; k++) {
+                addr = xzalloc(sizeof *addr);
+                addr->address = xstrdup(port_row->ip6_address_secondary[k]);
+                hmap_insert(&db_port->secondary_ip6addr, &addr->addr_node,
+                        hash_string(addr->address, 0));
+            }
+            shash_add_once(db_port_list, port_row->name, db_port);
+            VLOG_DBG("L3 interface '%s' added to DB port list",
+                    port_row->name);
+        }
+    }
+}
+
+/*
+ * This function is used to add a port to the local cache
+ * after processing it for IP addresses cleanup. This will ensure
+ * that the interface does not get reconfigured.
+ */
+static void
+portd_add_port_to_cache(struct port *port)
+{
+    struct vrf *vrf, *next_vrf;
+    size_t i;
+    HMAP_FOR_EACH_SAFE (vrf, next_vrf, node, &all_vrfs) {
+        for (i = 0; i < vrf->cfg->n_ports; i++) {
+            if (!strcmp(vrf->cfg->ports[i]->name, port->name)) {
+                hmap_insert(&vrf->ports, &port->port_node,
+                        hash_string(port->name, 0));
+            }
+        }
+    }
+}
+
+/*
+ * This function is used to ensure kernel and DB IP addresses
+ * are in sync after a daemon restart. It does the following:
+ * 1. Populate a list of kernel IPv4 & IPv6 addresses
+ *    (both primary and secondary)
+ * 2. Populate a list of IP addresses from the DB.
+ * 3. Compare the list of kernel IP addresses with the DB IP addresses
+ *    a) Delete obsolete IP addresses
+ *    b) Add new IP addresses
+ */
+void
+portd_ipaddr_config_on_init(void)
+{
+    struct shash kernel_port_list, db_port_list;
+    struct port *db_port;
+    struct kernel_port *kernel_port;
+    struct shash_node *node, *next;
+    struct net_address *addr, *next_addr;
+    bool add_to_local_cache = false;
+
+    /* Initialize and populate the list of kernel IP addresses */
+    shash_init(&kernel_port_list);
+    portd_populate_kernel_ip_addr(AF_INET, &kernel_port_list);
+    portd_populate_kernel_ip_addr(AF_INET6, &kernel_port_list);
+    /* Initialize and populate the list of DB IP addresses */
+    shash_init(&db_port_list);
+    portd_populate_db_ip_addr(&db_port_list);
+
+    if (VLOG_IS_DBG_ENABLED()) {
+        VLOG_DBG("Dump of kernel ports");
+        SHASH_FOR_EACH_SAFE (node, next, &kernel_port_list) {
+            kernel_port = node->data;
+            VLOG_DBG("Port Name : %s", kernel_port->name);
+            HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node,
+                    &kernel_port->ip4addr) {
+                VLOG_DBG("IPv4 addr : %s", addr->address);
+            }
+            HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node,
+                    &kernel_port->ip6addr) {
+                VLOG_DBG("IPv6 addr : %s", addr->address);
+            }
+        }
+        VLOG_DBG("Dump of DB ports");
+        SHASH_FOR_EACH_SAFE (node, next, &db_port_list) {
+            db_port = node->data;
+            VLOG_DBG("Port Name : %s", db_port->name);
+            VLOG_DBG("IPv4 addr : %s", db_port->ip4_address);
+            VLOG_DBG("IPv6 addr : %s", db_port->ip6_address);
+            HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node,
+                    &db_port->secondary_ip4addr) {
+                VLOG_DBG("Secondary IPv4 addr : %s", addr->address);
+            }
+            HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node,
+                    &db_port->secondary_ip6addr) {
+                VLOG_DBG("Secondary IPv6 addr : %s", addr->address);
+            }
+        }
+    }
+
+    /* We loop over the kernel port list and add/delete IP addresses
+     * after matching with DB */
+    SHASH_FOR_EACH_SAFE (node, next, &kernel_port_list) {
+        kernel_port = node->data;
+        db_port = shash_find_data(&db_port_list, kernel_port->name);
+        /* If port is not found in the DB, then it was possibly an L3 port
+         * which became L2 when the daemon crashed. Remove all IP addresses
+         * configured on that interface from the kernel */
+        if (!db_port) {
+            VLOG_DBG("Port %s is no longer L3. Deleting IP addresses"
+                     " from kernel", kernel_port->name);
+            HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                               &kernel_port->ip4addr) {
+                portd_set_ipaddr(RTM_DELADDR, kernel_port->name,
+                        addr->address, AF_INET, false);
+            }
+
+            HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                               &kernel_port->ip6addr) {
+                portd_set_ipaddr(RTM_DELADDR, kernel_port->name,
+                        addr->address, AF_INET6, false);
+            }
+            continue;
+        }
+        /* If port exists in the DB, then we will add to local cache.
+         * This is needed so that portd does not reconfigure the
+         * interfaces again. */
+        add_to_local_cache = true;
+
+        /* Remove all the IP addresses from the kernel that are not
+         * present in the DB */
+        HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                           &kernel_port->ip4addr) {
+            if (!portd_find_ip_addr_db(db_port,
+                    addr->address, false)) {
+                portd_set_ipaddr(RTM_DELADDR, db_port->name,
+                        addr->address, AF_INET, false);
+            }
+        }
+
+        HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                           &kernel_port->ip6addr) {
+            if (!portd_find_ip_addr_db(db_port,
+                    addr->address, true)) {
+                portd_set_ipaddr(RTM_DELADDR, db_port->name,
+                        addr->address, AF_INET6, false);
+            }
+        }
+
+        /* Check for IP addresses which are not present and add them */
+        if (db_port->ip4_address) {
+            if (!portd_find_ip_addr_kernel(kernel_port,
+                    db_port->ip4_address, false)) {
+                portd_set_ipaddr(RTM_NEWADDR, db_port->name,
+                        db_port->ip4_address, AF_INET, false);
+            }
+        }
+        if (db_port->ip6_address) {
+            if (!portd_find_ip_addr_kernel(kernel_port,
+                    db_port->ip6_address, true)) {
+                portd_set_ipaddr(RTM_NEWADDR, db_port->name,
+                        db_port->ip6_address, AF_INET6, false);
+            }
+        }
+        HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                           &db_port->secondary_ip4addr) {
+            if (!portd_find_ip_addr_kernel(kernel_port,
+                    addr->address, false)) {
+                portd_set_ipaddr(RTM_NEWADDR, db_port->name,
+                        addr->address, AF_INET, true);
+            }
+        }
+        HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                           &db_port->secondary_ip6addr) {
+            if (!portd_find_ip_addr_kernel(kernel_port,
+                    addr->address, true)) {
+                portd_set_ipaddr(RTM_NEWADDR, db_port->name,
+                        addr->address, AF_INET6, true);
+            }
+        }
+
+         if (add_to_local_cache) {
+            add_to_local_cache = false;
+            portd_add_port_to_cache(db_port);
+        }
+        /* Free kernel port */
+        hmap_destroy(&kernel_port->ip4addr);
+        hmap_destroy(&kernel_port->ip6addr);
+        free(kernel_port->name);
+        free(kernel_port);
+        kernel_port = NULL;
+    }
+    shash_destroy(&kernel_port_list);
+    shash_destroy(&db_port_list);
 }
