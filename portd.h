@@ -23,6 +23,7 @@
 #include "hmap.h"
 #include "shash.h"
 #include "vswitch-idl.h"
+#include "openhalon-idl.h"
 
 #define PORTD_DISABLE_ROUTING 0
 #define PORTD_ENABLE_ROUTING 1
@@ -31,6 +32,10 @@
 #define PORTD_IPV6_MAX_LEN 128
 #define PORT_INTERFACE_ADMIN_UP "up" // Interface admin state "up"
 #define PORT_INTERFACE_ADMIN_DOWN "down" // Interface admin state "down"
+#define LOOPBACK_INTERFACE_NAME "lo"
+#define RECV_BUFFER_SIZE 4096
+/* ifa_scope value of link local IPv6 address */
+#define IPV6_ADDR_SCOPE_LINK 253
 
 #define INET_ADDRSTRLEN     16
 #define INET_PREFIX_SIZE    18
@@ -88,6 +93,12 @@ struct prefix_ipv6
   struct in6_addr prefix __attribute__ ((aligned (8)));
 };
 
+struct kernel_port {
+    char *name;
+    struct hmap ip4addr; /* List of IPv4 address*/
+    struct hmap ip6addr; /*List of IPv6 address*/
+};
+
 void portd_exit_ipcfg(void);
 void portd_init_ipcfg(void);
 void portd_config_iprouting(int enable);
@@ -98,5 +109,6 @@ void portd_del_ipaddr(struct port *port);
 void portd_add_ipv4_addr(struct port *port);
 void portd_add_ipv6_addr(struct port *port);
 void portd_add_ipaddr(struct port *port);
+void portd_ipaddr_config_on_init(void);
 
 #endif /* PORTD_H_ */

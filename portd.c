@@ -50,8 +50,6 @@
 #include "unixctl.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
-#include "vswitch-idl.h"
-#include "openhalon-idl.h"
 #include "openhalon-dflt.h"
 #include "coverage.h"
 #include "hash.h"
@@ -71,8 +69,12 @@ bool commit_txn = false;
 static unixctl_cb_func portd_unixctl_dump;
 static int system_configured = false;
 
+/* This static boolean is used to config VLANs
+ * and sync IP addresses on init and to handle restarts. */
+static bool portd_config_on_init = true;
+
 /* All vrfs, indexed by name. */
-static struct hmap all_vrfs = HMAP_INITIALIZER(&all_vrfs);
+struct hmap all_vrfs = HMAP_INITIALIZER(&all_vrfs);
 
 static inline void
 portd_chk_for_system_configured(void)
@@ -193,6 +195,9 @@ portd_init(const char *remote)
                              portd_unixctl_dump, NULL);
 
     portd_init_ipcfg();
+    /* By default, we disable routing at the start.
+     * Enabling will be done as part of reconfigure. */
+    portd_config_iprouting(PORTD_DISABLE_ROUTING);
 }
 
 static void
@@ -210,6 +215,21 @@ portd_vrf_lookup(const char *name)
     HMAP_FOR_EACH_WITH_HASH (vrf, node, hash_string(name, 0), &all_vrfs) {
         if (!strcmp(vrf->name, name)) {
             return vrf;
+        }
+    }
+    return NULL;
+}
+
+struct ovsrec_port*
+portd_port_db_lookup(const char *name)
+{
+    const struct ovsrec_port *port_row;
+
+    OVSREC_PORT_FOR_EACH(port_row, idl) {
+        if (!strcmp(port_row->name, name)) {
+            struct ovsrec_port *temp_port_row =
+                    CONST_CAST(struct ovsrec_port *, port_row);
+            return temp_port_row;
         }
     }
     return NULL;
@@ -805,6 +825,8 @@ static void
 portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
 {
     struct shash_node *port_node;
+    int vlan_id;
+    struct smap hw_cfg_smap;
 
     SHASH_FOR_EACH (port_node, wanted_ports) {
         struct ovsrec_port *port_row = port_node->data;
@@ -814,8 +836,17 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
             VLOG_DBG("Creating new port %s vrf %s\n",port_row->name, vrf->name);
             portd_port_create(vrf, port_row);
             port = portd_port_lookup(vrf, port_row->name);
+            /* Only assign internal VLAN if not already present. */
+            smap_clone(&hw_cfg_smap, &port_row->hw_config);
+            vlan_id = smap_get_int(&hw_cfg_smap,
+                    PORT_HW_CONFIG_MAP_INTERNAL_VLAN_ID, 0);
 
-            portd_add_internal_vlan(port, port_row);
+            if(vlan_id == 0) {
+                portd_add_internal_vlan(port, port_row);
+            } else {
+                port->internal_vid = vlan_id;
+            }
+            smap_destroy(&hw_cfg_smap);
 
             portd_reconfig_ipaddr(port, port_row);
             VLOG_DBG("Port has IP: %s vrf %s\n", port_row->ip4_address,
@@ -848,6 +879,46 @@ portd_add_del_ports(void)
     }
 }
 
+/**
+ * This function will delete VLANs which no longer point to L3 ports.
+ * There are two cases:
+ * 1. The daemon crashed and an L3 interface became L2. The internal VLAN which
+ *    was previously pointing to the L3 interface needs to be deleted.
+ * 2. The daemon crashed and an interface went from L3 to L2 and back to L3.
+ *    A new internal VLAN would be assigned as it is considered
+ *    a new L3 interface. The previous internal VLAN needs to be removed.
+ */
+static void
+portd_vlan_config_on_init(void)
+{
+    const struct ovsrec_vlan *int_vlan_row;
+    struct smap vlan_internal_smap, hw_cfg_smap;
+    struct ovsrec_port *port_row;
+    int vlan_id;
+
+    OVSREC_VLAN_FOR_EACH(int_vlan_row, idl) {
+        smap_clone(&vlan_internal_smap, &int_vlan_row->internal_usage);
+        /* Check to see if VLAN is of type 'internal' */
+        if (!smap_is_empty(&vlan_internal_smap)) {
+            const char *port_name = smap_get(&vlan_internal_smap,
+                    VLAN_INTERNAL_USAGE_L3PORT);
+            port_row = portd_port_db_lookup(port_name);
+            smap_clone(&hw_cfg_smap, &port_row->hw_config);
+            vlan_id = smap_get_int(&hw_cfg_smap,
+                    PORT_HW_CONFIG_MAP_INTERNAL_VLAN_ID, 0);
+            /* Checks for the following cases:
+             * 1. Port has no internal VLAN id
+             * 2. Port has a VLAN id which is different */
+            if (vlan_id == 0 || int_vlan_row->id != vlan_id) {
+                VLOG_DBG("Deleting the internal VLAN : %ld", int_vlan_row->id);
+                portd_del_internal_vlan(int_vlan_row->id);
+            }
+            smap_destroy(&hw_cfg_smap);
+        }
+        smap_destroy(&vlan_internal_smap);
+    }
+}
+
 /* Checks to see if:
  * vrf has been added/deleted.
  * port has been added/deleted from a vrf.
@@ -867,9 +938,26 @@ portd_reconfigure(void)
     }
 
     portd_add_del_vrf();
+
+    /* In case the daemon restarts, ensure unused VLANs are deleted
+     * and IP addresses between DB and kernel are in sync */
+    if (portd_config_on_init) {
+        portd_vlan_config_on_init();
+        portd_ipaddr_config_on_init();
+    }
+
     portd_add_del_ports();
-    portd_process_interace_up_down_events();
+
+    /* IP addresses on kernel and DB are already in sync on init.
+       Skipping this function on init */
+    if (!portd_config_on_init) {
+        portd_process_interace_up_down_events();
+    }
     portd_process_interface_admin_up_down_events();
+
+    if (portd_config_on_init) {
+        portd_config_on_init = false;
+    }
 
     idl_seqno = new_idl_seqno; /* This has to be done after all changes are done */
     return;
