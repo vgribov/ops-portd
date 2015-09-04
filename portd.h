@@ -37,6 +37,8 @@
 /* ifa_scope value of link local IPv6 address */
 #define IPV6_ADDR_SCOPE_LINK 253
 
+#define PORTD_EMPTY_STRING ""
+
 #define INET_ADDRSTRLEN     16
 #define INET_PREFIX_SIZE    18
 
@@ -51,6 +53,7 @@
 struct port {
     struct hmap_node port_node; /* Element in struct vrf's "ports" hmap. */
     char *name;
+    char *type;    /* "internal" for VLAN interfaces/ports and NULL otherwise */
     const struct ovsrec_port *cfg;
 
     int internal_vid;
@@ -111,4 +114,11 @@ void portd_add_ipv6_addr(struct port *port);
 void portd_add_ipaddr(struct port *port);
 void portd_ipaddr_config_on_init(void);
 
+/* Inter-VLAN functions */
+void portd_add_vlan_interface(const char *parent_intf_name,
+                                const char *vlan_intf_name,
+                                const unsigned short vlan_tag);
+void portd_del_vlan_interface(const char *vlan_intf_name);
+void portd_interface_up_down(const char *interface_name,
+                               const char *status);
 #endif /* PORTD_H_ */
