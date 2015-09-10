@@ -17,21 +17,22 @@ cmake_minimum_required (VERSION 2.8)
 
 set (PORTD portd)
 project (${PORTD})
-
+set (SRC_DIR src)
+set (INCL_DIR include)
 
 # Rules to locate needed libraries
 include(FindPkgConfig)
 pkg_check_modules(OVSCOMMON REQUIRED libovscommon)
 pkg_check_modules(OVSDB REQUIRED libovsdb)
 
-include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}
+include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}/${INCL_DIR}
                      ${OVSCOMMON_INCLUDE_DIRS}
 )
 
 set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror")
 
 # Source files to build portd
-set (SOURCES portd.c portd_l3.c)
+set (SOURCES ${SRC_DIR}/portd.c ${SRC_DIR}/portd_l3.c)
 
 # Rules to build portd
 add_executable (${PORTD} ${SOURCES})
