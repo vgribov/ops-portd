@@ -15,6 +15,7 @@
  *   under the License.
  *
  * File: portd.c
+ *
  */
 
 /* This daemon handles the following functionality:
@@ -574,7 +575,7 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
         if (!port->cfg) {
 
             /* Send delete interface to kernel */
-            if (strcmp(port->type, INTERFACE_TYPE_INTERNAL)==0) {
+            if (strcmp(port->type, OVSREC_INTERFACE_TYPE_INTERNAL)==0) {
                 portd_del_vlan_interface(port->name);
             }
 
@@ -810,7 +811,7 @@ portd_interface_type_internal_check(const struct ovsrec_port *port, const char *
     for(i=0; i<port->n_interfaces; ++i) {
         intf = port->interfaces[i];
         if (strcmp(port->name, intf->name)==0 &&
-            strcmp(intf->type, INTERFACE_TYPE_INTERNAL)==0) {
+            strcmp(intf->type, OVSREC_INTERFACE_TYPE_INTERNAL)==0) {
 
             VLOG_DBG("[%s:%d]: Interface %s is of type \"internal\" found. ",
                         __FUNCTION__, __LINE__, interface_name);
@@ -929,7 +930,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                                          *(port->cfg->tag));
                 portd_interface_up_down(port_row->name, "up");
 
-                port->type = xstrdup(INTERFACE_TYPE_INTERNAL);
+                port->type = xstrdup(OVSREC_INTERFACE_TYPE_INTERNAL);
             } else {
                 /* Only assign internal VLAN if not already present. */
                 smap_clone(&hw_cfg_smap, &port_row->hw_config);
