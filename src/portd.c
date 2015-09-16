@@ -80,14 +80,14 @@ struct hmap all_vrfs = HMAP_INITIALIZER(&all_vrfs);
 static inline void
 portd_chk_for_system_configured(void)
 {
-    const struct ovsrec_open_vswitch *ovs_vsw = NULL;
+    const struct ovsrec_system *ovs_vsw = NULL;
 
     if (system_configured) {
         /* Nothing to do if we're already configured. */
         return;
     }
 
-    ovs_vsw = ovsrec_open_vswitch_first(idl);
+    ovs_vsw = ovsrec_system_first(idl);
 
     if (ovs_vsw && (ovs_vsw->cur_cfg > (int64_t) 0)) {
         system_configured = true;
@@ -117,9 +117,9 @@ portd_init(const char *remote)
     ovsdb_idl_add_table(idl, &ovsrec_table_subsystem);
     ovsdb_idl_add_column(idl, &ovsrec_subsystem_col_other_info);
 
-    ovsdb_idl_add_table(idl, &ovsrec_table_open_vswitch);
-    ovsdb_idl_add_column(idl, &ovsrec_open_vswitch_col_cur_cfg);
-    ovsdb_idl_add_column(idl, &ovsrec_open_vswitch_col_other_config);
+    ovsdb_idl_add_table(idl, &ovsrec_table_system);
+    ovsdb_idl_add_column(idl, &ovsrec_system_col_cur_cfg);
+    ovsdb_idl_add_column(idl, &ovsrec_system_col_other_config);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_vrf);
     ovsdb_idl_add_column(idl, &ovsrec_vrf_col_name);
@@ -614,33 +614,33 @@ portd_alloc_internal_vlan(void)
 {
     int i, ret = -1;
     const struct ovsrec_bridge *br_row = NULL;
-    const struct ovsrec_open_vswitch *ovs = NULL;
+    const struct ovsrec_system *sys = NULL;
     struct svec vlans;
     char vlan_name[16];
     int min_internal_vlan, max_internal_vlan;
     const char *internal_vlan_policy;
 
-    ovs = ovsrec_open_vswitch_first(idl);
+    sys = ovsrec_system_first(idl);
 
-    if (ovs) {
-        min_internal_vlan = smap_get_int(&ovs->other_config,
-                     OPEN_VSWITCH_OTHER_CONFIG_MAP_MIN_INTERNAL_VLAN,
-                     DFLT_OPEN_VSWITCH_OTHER_CONFIG_MAP_MIN_INTERNAL_VLAN_ID);
-        max_internal_vlan = smap_get_int(&ovs->other_config,
-                     OPEN_VSWITCH_OTHER_CONFIG_MAP_MAX_INTERNAL_VLAN,
-                     DFLT_OPEN_VSWITCH_OTHER_CONFIG_MAP_MAX_INTERNAL_VLAN_ID);
-        internal_vlan_policy = smap_get(&ovs->other_config,
-                     OPEN_VSWITCH_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY);
+    if (sys) {
+        min_internal_vlan = smap_get_int(&sys->other_config,
+                     SYSTEM_OTHER_CONFIG_MAP_MIN_INTERNAL_VLAN,
+                     DFLT_SYSTEM_OTHER_CONFIG_MAP_MIN_INTERNAL_VLAN_ID);
+        max_internal_vlan = smap_get_int(&sys->other_config,
+                     SYSTEM_OTHER_CONFIG_MAP_MAX_INTERNAL_VLAN,
+                     DFLT_SYSTEM_OTHER_CONFIG_MAP_MAX_INTERNAL_VLAN_ID);
+        internal_vlan_policy = smap_get(&sys->other_config,
+                     SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY);
         if (!internal_vlan_policy) {
             internal_vlan_policy =
-                OPEN_VSWITCH_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_ASCENDING_DEFAULT;
+                SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_ASCENDING_DEFAULT;
         }
         VLOG_DBG("min_internal : %d, %d, %s",
                   min_internal_vlan, max_internal_vlan,
                   internal_vlan_policy);
 
     } else {
-        VLOG_ERR("Unable to acces open_vswitch table in db.");
+        VLOG_ERR("Unable to acces system table in db.");
         return -1;
     }
 
@@ -653,7 +653,7 @@ portd_alloc_internal_vlan(void)
             }
             svec_sort(&vlans);
             if (!strcmp(internal_vlan_policy,
-                OPEN_VSWITCH_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_ASCENDING_DEFAULT)) {
+                SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_ASCENDING_DEFAULT)) {
                 int j;
                 bool found = false;
                 for (j = min_internal_vlan; j <= max_internal_vlan; j++) {
@@ -669,7 +669,7 @@ portd_alloc_internal_vlan(void)
                     ret = -1;
                 }
             } else if (!strcmp(internal_vlan_policy,
-                OPEN_VSWITCH_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_DESCENDING)) {
+                SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_DESCENDING)) {
                 int j;
                 bool found = false;
                 for (j = max_internal_vlan; j >= min_internal_vlan; j--) {
