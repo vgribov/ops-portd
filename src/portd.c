@@ -574,8 +574,12 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
         port->cfg = shash_find_data(wanted_ports, port->name);
         if (!port->cfg) {
 
+            VLOG_DBG("Processing port delete port: %s type: %s",
+                     port->name, port->type ? "inter-vlan" : "L3");
+
             /* Send delete interface to kernel */
-            if (strcmp(port->type, OVSREC_INTERFACE_TYPE_INTERNAL)==0) {
+            if (port->type &&
+                (strcmp(port->type, OVSREC_INTERFACE_TYPE_INTERNAL)==0)) {
                 portd_del_vlan_interface(port->name);
             }
 
