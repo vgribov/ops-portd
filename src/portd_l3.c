@@ -40,7 +40,7 @@ extern struct ovsdb_idl_txn *txn;
 extern bool commit_txn;
 extern struct hmap all_vrfs;
 
-int nl_ip_sock;
+extern int nl_sock;
 static int portd_get_prefix(int family, char *ip_address, void *prefix,
                             unsigned char *prefixlen);
 
@@ -324,46 +324,6 @@ portd_del_connected_route (char *address, char *port_name, bool is_v4)
 
 /*********** End Connected routes handling **************/
 
-static
-int portd_netlink_socket_open(void)
-{
-    struct sockaddr_nl s_addr;
-
-    int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
-
-    if (sock < 0) {
-        return sock;
-    }
-
-    memset((void *) &s_addr, 0, sizeof(s_addr));
-    s_addr.nl_family = AF_NETLINK;
-    s_addr.nl_pid = getpid();
-    s_addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
-    if (bind(sock, (struct sockaddr *) &s_addr, sizeof(s_addr)) < 0) {
-        return -1;
-    }
-
-    return sock;
-}
-
-static
-void portd_netlink_socket_close(int socket)
-{
-    close(socket);
-}
-
-void
-portd_exit_ipcfg(void)
-{
-    portd_netlink_socket_close(nl_ip_sock);
-}
-
-void
-portd_init_ipcfg(void)
-{
-    nl_ip_sock = portd_netlink_socket_open();
-}
-
 /* write to /proc entries to enable/disable Linux ip forwarding(routing) */
 void
 portd_config_iprouting(int enable)
@@ -519,8 +479,9 @@ portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
     memcpy(RTA_DATA(rta), ipaddr, bytelen);
     req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + RTA_ALIGN(buflen);
 
-    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
-        VLOG_ERR("Netlink failed to set IP address for '%s'", ip_address);
+    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to set IP address for '%s' (%s)",
+                 ip_address, strerror(errno));
         return;
     }
 
@@ -1044,9 +1005,9 @@ portd_add_vlan_interface(const char *interface_name,
     add_link_attr(&req.n, sizeof(req), IFLA_IFNAME, vlan_interface_name,
                   strlen(vlan_interface_name)+1);
 
-    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
-        VLOG_ERR("Netlink failed to create vlan interface: %s",
-                 vlan_interface_name);
+    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to create vlan interface: %s (%s)",
+                 vlan_interface_name, strerror(errno));
         return;
     }
 }
@@ -1088,71 +1049,9 @@ portd_del_vlan_interface(const char *vlan_interface_name)
         return;
     }
 
-    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
-        VLOG_ERR("Netlink failed to delete vlan interface: %s",
-                 vlan_interface_name);
-        return;
-    }
-}
-
-/**
- * Function: portd_interface_up_down
- * Param:
- *      vlan_interface_name: Name of the interface to be set to "up" or "down".
- *      status: "up" or "down".
- * Return:
- * Desc:
- *      Set an interface state to "up" or "down".
- * OPENSWITCH_TODO:
- *      Plugin to "shutdown"/"no shutdown" commands under an interface.
- */
-void
-portd_interface_up_down(const char *interface_name, const char *status)
-{
-    if (status == NULL || strcmp(status, PORTD_EMPTY_STRING)==0) {
-        VLOG_ERR("Invalid status argument");
-        return;
-    }
-
-    if (interface_name == NULL ||
-            strcmp(interface_name, PORTD_EMPTY_STRING)==0) {
-        VLOG_ERR("Invalid interface-name as argument");
-        return;
-    }
-
-    struct {
-        struct nlmsghdr  n;
-        struct ifinfomsg i;
-        char             buf[128];  /* must fit interface name length (IFNAMSIZ)*/
-    } req;
-
-    memset(&req, 0, sizeof(req));
-
-    req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
-    req.n.nlmsg_pid     = getpid();
-    req.n.nlmsg_type    = RTM_NEWLINK;
-    req.n.nlmsg_flags   = NLM_F_REQUEST;
-
-    req.i.ifi_family    = AF_UNSPEC;
-    req.i.ifi_index     = if_nametoindex(interface_name);
-
-    if (req.i.ifi_index==0) {
-        VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
-        return;
-    }
-
-    /* OPENSWITCH_TODO: _May_ have to convert this to "no shutdown"/"shutdown" */
-    if (strcmp(status, "up")==0) {
-        req.i.ifi_change |= IFF_UP;
-        req.i.ifi_flags  |= IFF_UP;
-    } else if (strcmp(status, "down")==0) {
-        req.i.ifi_change |= IFF_UP;
-        req.i.ifi_flags  &= ~IFF_UP;
-    }
-
-    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
-        VLOG_ERR("Netlink failed to bring %s the interface %s", status,
-                 interface_name);
+    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to delete vlan interface: %s (%s)",
+                 vlan_interface_name, strerror(errno));
         return;
     }
 }
@@ -1177,11 +1076,10 @@ find_or_create_kernel_port(struct shash *kernel_port_list, const char *ifname)
 }
 
 /*
- * This function is used to parse the Netlink response
- * for the dump request.
+ * Parse the Netlink response for ip address dump request.
  */
-static void
-parse_nl_msg(struct nlmsghdr *nlh, int msglen,
+void
+parse_nl_ip_address_msg(struct nlmsghdr *nlh, int msglen,
              struct shash *kernel_port_list)
 {
     struct rtattr *rta;
@@ -1252,57 +1150,6 @@ parse_nl_msg(struct nlmsghdr *nlh, int msglen,
     }
 }
 
-/*
- * This function is used to parse the dump command response.
- * It handles multi part message and calls the parse_nl_msg
- * function to act on Netlink messages.
- */
-static void
-parse_ip_addr_dump(struct shash *kernel_port_list)
-{
-    bool multipart_msg_end = false;
-    while (!multipart_msg_end) {
-        struct sockaddr_nl nladdr;
-        struct msghdr msg;
-        struct iovec iov;
-        struct nlmsghdr *nlh;
-        char buffer[RECV_BUFFER_SIZE];
-        int ret;
-
-        iov.iov_base = (void *)buffer;
-        iov.iov_len = sizeof(buffer);
-        msg.msg_name = (void *)&(nladdr);
-        msg.msg_namelen = sizeof(nladdr);
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-
-        ret = recvmsg(nl_ip_sock, &msg, 0);
-        if (ret < 0) {
-            return;
-        }
-        nlh = (struct nlmsghdr*) buffer;
-
-        switch(nlh->nlmsg_type) {
-
-            case RTM_NEWADDR:
-                parse_nl_msg(nlh, ret, kernel_port_list);
-                break;
-
-            case NLMSG_DONE:
-                VLOG_DBG("End of multi part message");
-                multipart_msg_end = true;
-                break;
-
-            default:
-                break;
-        }
-        if (!(nlh->nlmsg_flags & NLM_F_MULTI)) {
-            VLOG_DBG("End of message. Not a multipart message");
-            break;
-        }
-    }
-    return;
-}
 
 /*
  * This function is used to make netlink calls to dump the IP addresses
@@ -1331,14 +1178,16 @@ portd_populate_kernel_ip_addr(int family, struct shash *kernel_port_list)
     rta = (struct rtattr *)(((char *)&req) + NLMSG_ALIGN(req.n.nlmsg_len));
     rta->rta_len = RTA_LENGTH(bytelen);
 
-    if (send(nl_ip_sock, &req, req.n.nlmsg_len, 0) == -1) {
-        VLOG_ERR("Netlink failed to send message for IP addr dump");
+    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to send message for IP addr dump (%s)",
+                 strerror(errno));
         return;
     }
     VLOG_DBG("Netlink %s addr dump command sent",
             family == AF_INET? "IPv4" : "IPv6");
-    /* Parse the dump command response */
-    parse_ip_addr_dump(kernel_port_list);
+
+    /* Process the response from kernel */
+    nl_msg_process(kernel_port_list);
 }
 
 /*

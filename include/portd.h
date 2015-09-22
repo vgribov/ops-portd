@@ -102,8 +102,6 @@ struct kernel_port {
     struct hmap ip6addr; /*List of IPv6 address*/
 };
 
-void portd_exit_ipcfg(void);
-void portd_init_ipcfg(void);
 void portd_config_iprouting(int enable);
 void portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row);
 void portd_del_ipv4_addr(struct port *port);
@@ -119,6 +117,10 @@ void portd_add_vlan_interface(const char *parent_intf_name,
                                 const char *vlan_intf_name,
                                 const unsigned short vlan_tag);
 void portd_del_vlan_interface(const char *vlan_intf_name);
-void portd_interface_up_down(const char *interface_name,
-                               const char *status);
+
+/* Netlink functions */
+void nl_msg_process(void *use_data);
+void parse_nl_ip_address_msg(struct nlmsghdr *nlh, int msglen,
+                             struct shash *kernel_port_list);
+
 #endif /* PORTD_H_ */
