@@ -61,7 +61,7 @@
 VLOG_DEFINE_THIS_MODULE(portd);
 COVERAGE_DEFINE(portd_reconfigure);
 
-extern int nl_ip_sock;
+int nl_sock;
 unsigned int idl_seqno;
 struct ovsdb_idl *idl;
 struct ovsdb_idl_txn *txn;
@@ -76,6 +76,8 @@ static bool portd_config_on_init = true;
 
 /* All vrfs, indexed by name. */
 struct hmap all_vrfs = HMAP_INITIALIZER(&all_vrfs);
+
+static void portd_interface_up_down(const char *interface_name, const char *status);
 
 static inline void
 portd_chk_for_system_configured(void)
@@ -95,6 +97,168 @@ portd_chk_for_system_configured(void)
                 (int)ovs_vsw->cur_cfg);
     }
 
+}
+
+static void
+portd_netlink_socket_open (void)
+{
+    struct sockaddr_nl s_addr;
+
+    nl_sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+
+    if (nl_sock < 0) {
+        VLOG_ERR("Netlink socket creation failed (%s)",strerror(errno));
+        return;
+    }
+
+    memset((void *) &s_addr, 0, sizeof(s_addr));
+    s_addr.nl_family = AF_NETLINK;
+    s_addr.nl_pid = getpid();
+    s_addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK;
+    if (bind(nl_sock, (struct sockaddr *) &s_addr, sizeof(s_addr)) < 0) {
+        VLOG_ERR("Netlink socket bind failed (%s)",strerror(errno));
+        return;
+    }
+
+    VLOG_DBG("Netlink socket created. fd = %d",nl_sock);
+    return;
+}
+
+/*
+ * Fetch the OVSDB interface row and update the kernel with
+ * admin up/down messages
+ */
+static void
+portd_update_kernel_intf_up_down (char *intf_name)
+{
+    const struct ovsrec_interface *interface_row = NULL;
+    struct smap user_config;
+    const char *admin_status;
+
+    OVSREC_INTERFACE_FOR_EACH (interface_row, idl) {
+        if (!strcmp(intf_name, interface_row->name)) {
+            smap_clone(&user_config, &interface_row->user_config);
+            admin_status = smap_get(&user_config,
+                                    INTERFACE_USER_CONFIG_MAP_ADMIN);
+
+            if (admin_status != NULL &&
+                !strcmp(admin_status,
+                        OVSREC_INTERFACE_USER_CONFIG_ADMIN_UP)) {
+                portd_interface_up_down(interface_row->name,
+                                        OVSREC_INTERFACE_USER_CONFIG_ADMIN_UP);
+            } else {
+                portd_interface_up_down(interface_row->name,
+                                        OVSREC_INTERFACE_USER_CONFIG_ADMIN_DOWN);
+            }
+            smap_destroy(&user_config);
+        }
+    }
+}
+
+/*
+ * Parse the netlink message to read all the attributes of a
+ * new link message. On reading IFLA_IFNAME, verify the interface
+ * state from the DB and update the kernel accordingly.
+ */
+void
+parse_nl_new_link_msg (struct nlmsghdr *h)
+{
+    struct ifinfomsg *iface;
+    struct rtattr *attribute;
+    int len;
+
+    iface = NLMSG_DATA(h);
+    len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*iface));
+
+    for (attribute = IFLA_RTA(iface); RTA_OK(attribute, len);
+         attribute = RTA_NEXT(attribute, len)) {
+        switch(attribute->rta_type) {
+        case IFLA_IFNAME:
+            VLOG_DBG("New interface %d : %s\n",
+                     iface->ifi_index, (char *) RTA_DATA(attribute));
+            portd_update_kernel_intf_up_down((char *)RTA_DATA(attribute));
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+/*
+ * This function is used to parse the dump command response.
+ * It handles multi part message and calls the parse_nl_msg
+ * function to act on Netlink messages.
+ */
+void
+nl_msg_process (void *user_data)
+{
+    bool multipart_msg_end = false;
+
+    while (!multipart_msg_end) {
+        struct sockaddr_nl nladdr;
+        struct msghdr msg;
+        struct iovec iov;
+        struct nlmsghdr *nlh;
+        char buffer[RECV_BUFFER_SIZE];
+        int ret;
+
+        iov.iov_base = (void *)buffer;
+        iov.iov_len = sizeof(buffer);
+        msg.msg_name = (void *)&(nladdr);
+        msg.msg_namelen = sizeof(nladdr);
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+
+        /* In order not to block on the recvmsg, MSG_DONTWAIT
+         * is passed as a flag. the return value is EAGAIN if
+         * no data is available
+         */
+        ret = recvmsg(nl_sock, &msg, MSG_DONTWAIT);
+
+        if (ret < 0) {
+            return;
+        }
+
+        nlh = (struct nlmsghdr*) buffer;
+
+        for (nlh = (struct nlmsghdr *) buffer;
+             NLMSG_OK(nlh, ret);
+             nlh = NLMSG_NEXT(nlh, ret)) {
+            switch(nlh->nlmsg_type) {
+
+            case RTM_NEWADDR:
+                /*
+                 * The network address dump request is only made
+                 * during init. The assumption is that all the
+                 * address messages from the kernel comes back
+                 * immediately. So, check on the portd_config_on_init
+                 * flag before we process address messages from kernel
+                 */
+                if (portd_config_on_init) {
+                    parse_nl_ip_address_msg(nlh, ret, user_data);
+                }
+                break;
+            case RTM_NEWLINK:
+                parse_nl_new_link_msg(nlh);
+                break;
+
+            case NLMSG_DONE:
+                VLOG_DBG("End of multi part message");
+                multipart_msg_end = true;
+                break;
+
+            default:
+                break;
+            } /* end of switch */
+
+            if (!(nlh->nlmsg_flags & NLM_F_MULTI)) {
+                VLOG_DBG("End of message. Not a multipart message");
+                goto end;
+            }
+        }
+    }
+end:
+    return;
 }
 
 /* Register for port table notifications so that:
@@ -201,7 +365,11 @@ portd_init(const char *remote)
     unixctl_command_register("portd/dump", "", 0, 0,
                              portd_unixctl_dump, NULL);
 
-    portd_init_ipcfg();
+    /*
+     * Open a netlink socket for communication with the kernel
+     */
+    portd_netlink_socket_open();
+
     /* By default, we disable routing at the start.
      * Enabling will be done as part of reconfigure. */
     portd_config_iprouting(PORTD_DISABLE_ROUTING);
@@ -210,7 +378,7 @@ portd_init(const char *remote)
 static void
 portd_exit(void)
 {
-    portd_exit_ipcfg();
+    close(nl_sock);
     ovsdb_idl_destroy(idl);
 }
 
@@ -428,6 +596,72 @@ portd_add_del_vrf(void)
     shash_destroy(&new_vrfs);
 }
 
+/**
+ * Function: portd_interface_up_down
+ * Param:
+ *      vlan_interface_name: Name of the interface to be set to "up" or "down".
+ *      status: "up" or "down".
+ * Return:
+ * Desc:
+ *      Set an interface state to "up" or "down".
+ * OPS_TODO:
+ *      Plugin to "shutdown"/"no shutdown" commands under an interface.
+ */
+static void
+portd_interface_up_down(const char *interface_name, const char *status)
+{
+    struct {
+        struct nlmsghdr  n;
+        struct ifinfomsg i;
+        char             buf[128];  /* must fit interface name length (IFNAMSIZ)*/
+    } req;
+
+    if (status == NULL || strcmp(status, PORTD_EMPTY_STRING)==0) {
+        VLOG_ERR("Invalid status argument");
+        return;
+    }
+
+    if (interface_name == NULL ||
+            strcmp(interface_name, PORTD_EMPTY_STRING)==0) {
+        VLOG_ERR("Invalid interface-name as argument");
+        return;
+    }
+
+    memset(&req, 0, sizeof(req));
+
+    req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
+    req.n.nlmsg_pid     = getpid();
+    req.n.nlmsg_type    = RTM_NEWLINK;
+    req.n.nlmsg_flags   = NLM_F_REQUEST;
+
+    req.i.ifi_family    = AF_UNSPEC;
+    req.i.ifi_index     = if_nametoindex(interface_name);
+
+    if (req.i.ifi_index==0) {
+        VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
+        return;
+    }
+
+    /* OPS_TODO: _May_ have to convert this to "no shutdown"/"shutdown" */
+    if (strcmp(status, "up")==0) {
+        req.i.ifi_change |= IFF_UP;
+        req.i.ifi_flags  |= IFF_UP;
+    } else if (strcmp(status, "down")==0) {
+        req.i.ifi_change |= IFF_UP;
+        req.i.ifi_flags  &= ~IFF_UP;
+    }
+
+    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to bring %s the interface %s", status,
+                 interface_name);
+        return;
+    }
+}
+
+/*
+ * Process interface shutdown/no shutdown events that is configured
+ * by the user. This function is called during runtime.
+ */
 static void
 portd_process_interface_admin_up_down_events (void)
 {
@@ -612,7 +846,7 @@ portd_port_create(struct vrf *vrf, struct ovsrec_port *port_row)
     return;
 }
 
-/* HALON_TODO - update port table status column with error if no VLAN allocated. */
+/* OPS_TODO - update port table status column with error if no VLAN allocated. */
 static int
 portd_alloc_internal_vlan(void)
 {
@@ -749,7 +983,7 @@ portd_create_vlan_row(int vid, struct ovsrec_port *port_row)
     }
 }
 
-/* HALON_TODO - move internal_vlan functions to a separate file */
+/* OPS_TODO - move internal_vlan functions to a separate file */
 static void
 portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
 {
@@ -759,7 +993,7 @@ portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
     struct smap hw_cfg_smap;
     const struct ovsrec_subsystem *ovs_subsys;
 
-    /* HALON_TODO: handle multiple subsystems. */
+    /* OPS_TODO: handle multiple subsystems. */
     ovs_subsys = ovsrec_subsystem_first(idl);
 
     if (ovs_subsys) {
@@ -846,7 +1080,6 @@ portd_port_in_bridge_check(const char *port_name, const char *bridge_name)
     size_t  i;
 
     OVSREC_BRIDGE_FOR_EACH_SAFE(row, next, idl) {
-        /* OPENSWITCH_TODO: is strcmp() right api? */
         if (bridge_name &&
             (strcmp(bridge_name, PORTD_EMPTY_STRING) !=0) &&
             (strcmp(row->name, bridge_name) != 0)) {
@@ -1023,10 +1256,44 @@ portd_vlan_config_on_init(void)
     }
 }
 
+/*
+ * One time request to get a dump of all the interfaces from the kernel
+ * This is done during init, or daemon restart to keep the interface
+ * state in sync with the OVSDB
+ */
+static void
+portd_intf_config_on_init (void)
+{
+    struct rtattr *rta;
+    struct {
+        struct nlmsghdr hdr;
+        struct rtgenmsg gen;
+    } req;
+
+    memset (&req, 0, sizeof(req));
+
+    req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
+    req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.hdr.nlmsg_type = RTM_GETLINK;
+
+    req.gen.rtgen_family = AF_PACKET;
+
+    rta = (struct rtattr *)(((char *)&req) + NLMSG_ALIGN(req.hdr.nlmsg_len));
+    rta->rta_len = RTA_LENGTH(4);
+
+    if (send(nl_sock, &req, req.hdr.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to send message for link dump");
+        return;
+    }
+    /* Process the response from kernel */
+    nl_msg_process(NULL);
+}
+
 /* Checks to see if:
  * vrf has been added/deleted.
  * port has been added/deleted from a vrf.
  * port has been modified (IP address(es)).
+ * interface has been created in the kernel.
  */
 static void
 portd_reconfigure(void)
@@ -1048,6 +1315,11 @@ portd_reconfigure(void)
     if (portd_config_on_init) {
         portd_vlan_config_on_init();
         portd_ipaddr_config_on_init();
+        /*
+         * Get kernel dump of all the interfaces and configure
+         * up/down accordingly based on DB
+         */
+        portd_intf_config_on_init();
     }
 
     portd_add_del_ports();
@@ -1056,15 +1328,34 @@ portd_reconfigure(void)
        Skipping this function on init */
     if (!portd_config_on_init) {
         portd_process_interace_up_down_events();
+        /*
+         * Read any OVSDB interface shut/no shut updates and
+         * update the kernel accordingly
+         */
+        portd_process_interface_admin_up_down_events();
     }
-    portd_process_interface_admin_up_down_events();
 
     if (portd_config_on_init) {
         portd_config_on_init = false;
     }
-
-    idl_seqno = new_idl_seqno; /* This has to be done after all changes are done */
+    /* After all changes are done, update the seqno. */
+    idl_seqno = new_idl_seqno;
     return;
+}
+
+static void
+portd_service_netlink_messages (void)
+{
+    if (!portd_config_on_init) {
+        /*
+         * Get kernel notifications about interface creations
+         * and update the kernel interface with IFF_UP/~IFF_UP
+         * as per DB configurations
+         */
+        if (nl_sock > 0) {
+            nl_msg_process(NULL);
+        }
+    }
 }
 
 static void
@@ -1077,7 +1368,6 @@ portd_run(void)
 
         VLOG_ERR_RL(&rl, "another halon-portd process is running, "
                     "disabling this process until it goes away");
-
         return;
     } else if (!ovsdb_idl_has_lock(idl)) {
         return;
@@ -1091,21 +1381,30 @@ portd_run(void)
     commit_txn = false; /* if db was modified, this flag gets set */
     txn = ovsdb_idl_txn_create(idl);
     portd_reconfigure();
+    portd_service_netlink_messages();
     if (commit_txn) {
         ovsdb_idl_txn_commit_block(txn);
     }
     ovsdb_idl_txn_destroy(txn);
     VLOG_INFO_ONCE("%s (Halon portd) %s", program_name, VERSION);
 
-    /* HALON_TODO - verify db write was successful, else retry. */
-    /* HALON_TODO - restartability of portd, ovsdb */
-    /* HALON_TODO - cur_cfg delete once after system init */
+    /* OPS_TODO - verify db write was successful, else retry. */
+    /* OPS_TODO - cur_cfg delete once after system init */
+}
+
+static void
+portd_netlink_recv_wait__ (void)
+{
+    if(nl_sock > 0 && system_configured) {
+        poll_fd_wait(nl_sock, POLLIN);
+    }
 }
 
 static void
 portd_wait(void)
 {
     ovsdb_idl_wait(idl);
+    portd_netlink_recv_wait__();
     poll_timer_wait(PORTD_POLL_INTERVAL * 1000);
 }
 
@@ -1250,9 +1549,8 @@ main(int argc, char *argv[])
         unixctl_server_wait(unixctl);
         if (exiting) {
             poll_immediate_wake();
-        } else {
-            poll_block();
         }
+        poll_block();
     }
     portd_exit();
     unixctl_server_destroy(unixctl);
