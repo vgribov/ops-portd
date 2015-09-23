@@ -15,27 +15,26 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-from halonvsi.docker import *
-from halonvsi.halon import *
+from opsvsi.docker import *
+from opsvsi.opsvsitest import *
 
-class connectedRoutesCTTest( HalonTest ):
+class connectedRoutesCTTest( OpsVsiTest ):
 
     def setupNet(self):
-        self.net = Mininet(topo=SingleSwitchTopo(k=0,
-                                                 hopts=self.getHostOpts(),
-                                                 sopts=self.getSwitchOpts()),
-                                                 switch=HalonSwitch,
-                                                 host=HalonHost,
-                                                 link=HalonLink, controller=None,
-                                                 build=True)
+        host_opts = self.getHostOpts()
+        switch_opts = self.getSwitchOpts()
+        portd_topo = SingleSwitchTopo(k=0, hopts=host_opts, sopts=switch_opts)
+        self.net = Mininet(portd_topo, switch=VsiOpenSwitch,
+                           host=Host, link=OpsVsiLink,
+                           controller=None, build=True)
 
     def testConfigure(self):
         info('\n########## Test portd addition of connected routes ##########\n')
         info('\n### Configuring the topology ###\n')
         s1 = self.net.switches[ 0 ]
 
-        s1.cmd("/usr/bin/ovs-vsctl set interface 1 user_config:admin=up")
-        s1.cmd("/usr/bin/ovs-vsctl set interface 2 user_config:admin=up")
+        s1.ovscmd("/usr/bin/ovs-vsctl set interface 1 user_config:admin=up")
+        s1.ovscmd("/usr/bin/ovs-vsctl set interface 2 user_config:admin=up")
 
         # Configure switch s1
         s1.cmdCLI("configure terminal")

@@ -15,22 +15,20 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import pytest
-from halonvsi.docker import *
-from halonvsi.halon import *
+from opsvsi.docker import *
+from opsvsi.opsvsitest import *
 
 vlan_interface = "vlan10"
 
-class Inter_VLAN_Interface_CT( HalonTest ):
+class Inter_VLAN_Interface_CT( OpsVsiTest ):
 
     def setupNet(self):
-        self.net = Mininet(topo=SingleSwitchTopo(k=0,
-                                                 hopts=self.getHostOpts(),
-                                                 sopts=self.getSwitchOpts()),
-                                                 switch=HalonSwitch,
-                                                 host=HalonHost,
-                                                 link=HalonLink, controller=None,
-                                                 build=True)
+        host_opts = self.getHostOpts()
+        switch_opts = self.getSwitchOpts()
+        portd_topo = SingleSwitchTopo(k=0, hopts=host_opts, sopts=switch_opts)
+        self.net = Mininet(portd_topo, switch=VsiOpenSwitch,
+                           host=Host, link=OpsVsiLink,
+                           controller=None, build=True)
 
     def test_intervlan_interface(self):
         '''
