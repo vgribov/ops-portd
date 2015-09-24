@@ -15,7 +15,7 @@
 
 cmake_minimum_required (VERSION 2.8)
 
-set (PORTD portd)
+set (PORTD ops-portd)
 project (${PORTD})
 set (SRC_DIR src)
 set (INCL_DIR include)
@@ -31,15 +31,15 @@ include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}/${INCL_DIR}
 
 set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror")
 
-# Source files to build portd
+# Source files to build ops-portd
 set (SOURCES ${SRC_DIR}/portd.c ${SRC_DIR}/portd_l3.c)
 
-# Rules to build portd
+# Rules to build ops-portd
 add_executable (${PORTD} ${SOURCES})
 target_link_libraries (${PORTD} ${OVSCOMMON_LIBRARIES}
                        ${OVSDB_LIBRARIES}
                        -lpthread -lrt)
 
-# Rules to install portd binary in rootfs
+# Rules to install ops-portd binary in rootfs
 install(TARGETS ${PORTD}
     RUNTIME DESTINATION bin)
