@@ -22,6 +22,7 @@
  * - Allocating internal VLAN for L3 interface.
  * - Configuring IP address for L3 interface.
  * - Enable/disable IP routing
+ * - Add/delete intervlan interfaces
  */
 
 #include <errno.h>
@@ -73,11 +74,63 @@ static int system_configured = false;
 /* This static boolean is used to config VLANs
  * and sync IP addresses on init and to handle restarts. */
 static bool portd_config_on_init = true;
+/* This sock will only be used during init */
+int init_sock;
 
 /* All vrfs, indexed by name. */
 struct hmap all_vrfs = HMAP_INITIALIZER(&all_vrfs);
 
 static void portd_interface_up_down(const char *interface_name, const char *status);
+
+/*
+ * Lookup port entry from DB
+ */
+static struct ovsrec_port*
+portd_port_db_lookup(const char *name)
+{
+    const struct ovsrec_port *port_row;
+
+    OVSREC_PORT_FOR_EACH(port_row, idl) {
+        if (!strcmp(port_row->name, name)) {
+            struct ovsrec_port *temp_port_row =
+                    CONST_CAST(struct ovsrec_port *, port_row);
+            return temp_port_row;
+        }
+    }
+    return NULL;
+}
+
+static struct vrf*
+portd_vrf_lookup(const char *name)
+{
+    struct vrf *vrf;
+
+    HMAP_FOR_EACH_WITH_HASH (vrf, node, hash_string(name, 0), &all_vrfs) {
+        if (!strcmp(vrf->name, name)) {
+            return vrf;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Parse the nested rtattr in IFLA_LINKFO and check if the interface
+ * is of type 'vlan'
+ */
+static bool
+portd_check_interface_type_vlan(struct rtattr *link_info, int len)
+{
+    while ((RTA_OK(link_info, len)) &&
+           (link_info->rta_type <= IFLA_INFO_MAX)) {
+            /* Check for Interface type 'vlan' */
+            if ((link_info->rta_type == IFLA_INFO_KIND) &&
+                (strcmp(RTA_DATA(link_info), INTERFACE_TYPE_VLAN) == 0)) {
+            return true;
+        }
+        link_info = RTA_NEXT(link_info, len);
+    }
+    return false;
+}
 
 static inline void
 portd_chk_for_system_configured(void)
@@ -99,29 +152,152 @@ portd_chk_for_system_configured(void)
 
 }
 
+/*
+ * Creates a netlink socket. We currently use two sockets:
+ * 1. nl_sock   : To listen for udpates from the kernel
+ * 2. init_sock : To send IP address & interface dump requests
+ *                and perform reconfiguration on init.
+ */
 static void
-portd_netlink_socket_open (void)
+portd_netlink_socket_open (int *sock, bool is_init_sock)
 {
     struct sockaddr_nl s_addr;
 
-    nl_sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+    *sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
 
-    if (nl_sock < 0) {
+    if (*sock < 0) {
         VLOG_ERR("Netlink socket creation failed (%s)",strerror(errno));
         return;
     }
 
     memset((void *) &s_addr, 0, sizeof(s_addr));
     s_addr.nl_family = AF_NETLINK;
-    s_addr.nl_pid = getpid();
-    s_addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK;
-    if (bind(nl_sock, (struct sockaddr *) &s_addr, sizeof(s_addr)) < 0) {
+    if (!is_init_sock) {
+        s_addr.nl_pid = getpid();
+        s_addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK;
+    }
+    if (bind(*sock, (struct sockaddr *) &s_addr, sizeof(s_addr)) < 0) {
         VLOG_ERR("Netlink socket bind failed (%s)",strerror(errno));
         return;
     }
 
-    VLOG_DBG("Netlink socket created. fd = %d",nl_sock);
+    VLOG_DBG("Netlink socket created. fd = %d",*sock);
     return;
+}
+
+/**
+ * Function: portd_interface_type_internal_check
+ * Param:
+ *      port: port record whose interfaces are examined for "internal" type.
+ *      interface_name: Name of interface to check "internal" type.
+ * Return:
+ *      true  : Provided interface exists and is of type "internal"
+ *      false : Provide interface either doesn't exist or not "internal" type.
+ */
+bool
+portd_interface_type_internal_check(const struct ovsrec_port *port,
+                                    const char *interface_name)
+{
+    struct ovsrec_interface *intf;
+    size_t i=0;
+
+    for (i=0; i<port->n_interfaces; ++i) {
+        intf = port->interfaces[i];
+        if (strcmp(port->name, intf->name)==0 &&
+            strcmp(intf->type, OVSREC_INTERFACE_TYPE_INTERNAL)==0) {
+
+            VLOG_DBG("[%s:%d]: Interface %s is of type \"internal\" found. ",
+                        __FUNCTION__, __LINE__, interface_name);
+            return true;
+        }
+    }
+
+    VLOG_DBG("[%s:%d]: Interface %s is NOT of type \"internal\". ",
+                __FUNCTION__, __LINE__, interface_name);
+    return false;
+}
+
+/**
+ * Function: portd_port_in_bridge_check
+ * Param:
+ *      port_name: Name of port that is examined in bridge normal record.
+ *      bridge_name: Name of bridge to be examined. If NULL/Empty, check all
+ *                   bridge records.
+ * Return:
+ *      true  : Provided port is present in "bridge_normal"
+ *      false : Provide port is not in "bridge_normal"
+ */
+bool
+portd_port_in_bridge_check(const char *port_name, const char *bridge_name)
+{
+    const struct ovsrec_bridge *row, *next;
+    struct ovsrec_port  *port;
+    size_t  i;
+
+    OVSREC_BRIDGE_FOR_EACH_SAFE (row, next, idl) {
+        /* OPS_TODO: is strcmp() right api? */
+        if (bridge_name &&
+            (strcmp(bridge_name, PORTD_EMPTY_STRING) !=0) &&
+            (strcmp(row->name, bridge_name) != 0)) {
+            continue;
+        }
+
+        for (i=0; i<row->n_ports; i++) {
+            port = row->ports[i];
+            /* input port is part of one of bridge */
+            if (strcmp(port->name, port_name)==0) {
+                VLOG_DBG("[%s:%d]: Port %s is part of bridge %s", __FUNCTION__,
+                                __LINE__, port_name, bridge_name);
+                return true;
+            }
+        }
+    }
+
+    VLOG_DBG("[%s:%d]: Port %s is NOT found in bridge %s", __FUNCTION__,
+            __LINE__, port_name, bridge_name);
+
+    return false;
+}
+
+/**
+ * Function: portd_port_in_vrf_check
+ * Param:
+ *      port_name: Name of port that is examined in default VRF record.
+ *      vrf_name: Name of VRF to be examined. NULL/empty string means, search
+ *                ALL VRF records.
+ * Return:
+ *      true  : Provided port is present in default VRF
+ *      false : Provide port is not in default VRF
+ */
+bool
+portd_port_in_vrf_check(const char *port_name, const char *vrf_name)
+{
+    const struct ovsrec_vrf *row, *next;
+    struct ovsrec_port  *port;
+    size_t  i;
+
+    OVSREC_VRF_FOR_EACH_SAFE (row, next, idl) {
+        if (vrf_name &&
+            (strcmp(vrf_name, PORTD_EMPTY_STRING) !=0) &&
+            (strcmp(row->name, vrf_name) != 0)) {
+            continue;
+        }
+
+        for (i=0; i<row->n_ports; i++) {
+            port = row->ports[i];
+            /* input port is part of one of bridge */
+            if (strcmp(port->name, port_name)==0) {
+                VLOG_DBG("[%s:%d]: Port %s is part of VRF %s", __FUNCTION__,
+                                __LINE__, port_name, vrf_name);
+                return true;
+            }
+        }
+    }
+
+    VLOG_DBG("[%s:%d]: Port %s is NOT found in VRF %s", __FUNCTION__,
+            __LINE__, port_name, vrf_name);
+
+    return false;
 }
 
 /*
@@ -156,6 +332,39 @@ portd_update_kernel_intf_up_down (char *intf_name)
 }
 
 /*
+ * Fetch the OVSDB port row for VLAN
+ * and delete from kernel if not present in DB
+ */
+static void
+portd_vlan_intf_config_on_init(int intf_index, struct rtattr *link_info)
+{
+    struct ovsrec_port *port_row;
+    char ifname[IF_NAMESIZE];
+
+    if (!portd_check_interface_type_vlan(RTA_DATA(link_info),
+                                         RTA_PAYLOAD(link_info))) {
+        /* Interface is not of type 'vlan' */
+        return;
+    }
+
+    memset(ifname, 0, sizeof(ifname));
+    if_indextoname(intf_index, ifname);
+
+    port_row = portd_port_db_lookup(ifname);
+    /*
+     * Check if vlan interface entry was present in DB.
+     * If not, remove the vlan interface from the kernel.
+     */
+    if (!port_row ||
+        !(portd_interface_type_internal_check(port_row, port_row->name) &&
+          portd_port_in_bridge_check(port_row->name, DEFAULT_BRIDGE_NAME) &&
+          portd_port_in_vrf_check(port_row->name, DEFAULT_VRF_NAME))) {
+        VLOG_DBG("Deleting VLAN Interface %s", ifname);
+        portd_del_vlan_interface(ifname);
+    }
+}
+
+/*
  * Parse the netlink message to read all the attributes of a
  * new link message. On reading IFLA_IFNAME, verify the interface
  * state from the DB and update the kernel accordingly.
@@ -178,6 +387,15 @@ parse_nl_new_link_msg (struct nlmsghdr *h)
                      iface->ifi_index, (char *) RTA_DATA(attribute));
             portd_update_kernel_intf_up_down((char *)RTA_DATA(attribute));
             break;
+        case IFLA_LINKINFO:
+            /*
+             * This case is especially used for processing
+             * intervlan interfaces. They are processed only during init.
+             */
+            if (portd_config_on_init) {
+                portd_vlan_intf_config_on_init(iface->ifi_index, attribute);
+            }
+            break;
         default:
             break;
         }
@@ -188,9 +406,11 @@ parse_nl_new_link_msg (struct nlmsghdr *h)
  * This function is used to parse the dump command response.
  * It handles multi part message and calls the parse_nl_msg
  * function to act on Netlink messages.
+ * The on_init flag is used to ensure that the recvmsg
+ * blocks when init socket is reading the dump responses.
  */
 void
-nl_msg_process (void *user_data)
+nl_msg_process (void *user_data, int sock, bool on_init)
 {
     bool multipart_msg_end = false;
 
@@ -212,8 +432,12 @@ nl_msg_process (void *user_data)
         /* In order not to block on the recvmsg, MSG_DONTWAIT
          * is passed as a flag. the return value is EAGAIN if
          * no data is available
+         * MSG_DONTWAIT is used during normal flow.
+         * On init, we will block till we get updates from
+         * the kernel and perform reconfiguration of
+         * IP addresses and interfaces
          */
-        ret = recvmsg(nl_sock, &msg, MSG_DONTWAIT);
+        ret = recvmsg(sock, &msg, on_init? 0 : MSG_DONTWAIT);
 
         if (ret < 0) {
             return;
@@ -235,7 +459,7 @@ nl_msg_process (void *user_data)
                  * flag before we process address messages from kernel
                  */
                 if (portd_config_on_init) {
-                    parse_nl_ip_address_msg(nlh, ret, user_data);
+                    parse_nl_ip_address_msg_on_init(nlh, ret, user_data);
                 }
                 break;
             case RTM_NEWLINK:
@@ -368,7 +592,7 @@ portd_init(const char *remote)
     /*
      * Open a netlink socket for communication with the kernel
      */
-    portd_netlink_socket_open();
+    portd_netlink_socket_open(&nl_sock, false);
 
     /* By default, we disable routing at the start.
      * Enabling will be done as part of reconfigure. */
@@ -380,34 +604,6 @@ portd_exit(void)
 {
     close(nl_sock);
     ovsdb_idl_destroy(idl);
-}
-
-static struct vrf*
-portd_vrf_lookup(const char *name)
-{
-    struct vrf *vrf;
-
-    HMAP_FOR_EACH_WITH_HASH (vrf, node, hash_string(name, 0), &all_vrfs) {
-        if (!strcmp(vrf->name, name)) {
-            return vrf;
-        }
-    }
-    return NULL;
-}
-
-struct ovsrec_port*
-portd_port_db_lookup(const char *name)
-{
-    const struct ovsrec_port *port_row;
-
-    OVSREC_PORT_FOR_EACH(port_row, idl) {
-        if (!strcmp(port_row->name, name)) {
-            struct ovsrec_port *temp_port_row =
-                    CONST_CAST(struct ovsrec_port *, port_row);
-            return temp_port_row;
-        }
-    }
-    return NULL;
 }
 
 /* delete internal port cache */
@@ -1031,119 +1227,6 @@ portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
 
 }
 
-/**
- * Function: portd_interface_type_internal_check
- * Param:
- *      port: port record whose interfaces are examined for "internal" type.
- *      interface_name: Name of interface to check "internal" type.
- * Return:
- *      1: Provided interface exists and is of type "internal"
- *      0: Provide interface either doesn't exist or not "internal" type.
- */
-static int
-portd_interface_type_internal_check(const struct ovsrec_port *port, const char *interface_name)
-{
-    struct ovsrec_interface *intf;
-    size_t i=0;
-
-    for(i=0; i<port->n_interfaces; ++i) {
-        intf = port->interfaces[i];
-        if (strcmp(port->name, intf->name)==0 &&
-            strcmp(intf->type, OVSREC_INTERFACE_TYPE_INTERNAL)==0) {
-
-            VLOG_DBG("[%s:%d]: Interface %s is of type \"internal\" found. ",
-                        __FUNCTION__, __LINE__, interface_name);
-            return 1;
-        }
-    }
-
-    VLOG_DBG("[%s:%d]: Interface %s is NOT of type \"internal\". ",
-                __FUNCTION__, __LINE__, interface_name);
-    return 0;
-}
-
-/**
- * Function: portd_port_in_bridge_check
- * Param:
- *      port_name: Name of port that is examined in bridge normal record.
- *      bridge_name: Name of bridge to be examined. If NULL/Empty, check all
- *                   bridge records.
- * Return:
- *      1: Provided port is present in "bridge_normal"
- *      0: Provide port is not in "bridge_normal"
- */
-static int
-portd_port_in_bridge_check(const char *port_name, const char *bridge_name)
-{
-    const struct ovsrec_bridge *row, *next;
-    struct ovsrec_port  *port;
-    size_t  i;
-
-    OVSREC_BRIDGE_FOR_EACH_SAFE(row, next, idl) {
-        if (bridge_name &&
-            (strcmp(bridge_name, PORTD_EMPTY_STRING) !=0) &&
-            (strcmp(row->name, bridge_name) != 0)) {
-            continue;
-        }
-
-        for(i=0; i<row->n_ports; i++) {
-            port = row->ports[i];
-            /* input port is part of one of bridge */
-            if (strcmp(port->name, port_name)==0) {
-                VLOG_DBG("[%s:%d]: Port %s is part of bridge %s", __FUNCTION__,
-                                __LINE__, port_name, bridge_name);
-                return 1;
-            }
-        }
-    }
-
-    VLOG_DBG("[%s:%d]: Port %s is NOT found in bridge %s", __FUNCTION__,
-            __LINE__, port_name, bridge_name);
-
-    return 0;
-}
-
-/**
- * Function: portd_port_in_vrf_check
- * Param:
- *      port_name: Name of port that is examined in default VRF record.
- *      vrf_name: Name of VRF to be examined. NULL/empty string means, search
- *                ALL VRF records.
- * Return:
- *      1: Provided port is present in default VRF
- *      0: Provide port is not in default VRF
- */
-static int
-portd_port_in_vrf_check(const char *port_name, const char *vrf_name)
-{
-    const struct ovsrec_vrf *row, *next;
-    struct ovsrec_port  *port;
-    size_t  i;
-
-    OVSREC_VRF_FOR_EACH_SAFE (row, next, idl) {
-        if (vrf_name &&
-            (strcmp(vrf_name, PORTD_EMPTY_STRING) !=0) &&
-            (strcmp(row->name, vrf_name) != 0)) {
-            continue;
-        }
-
-        for(i=0; i<row->n_ports; i++) {
-            port = row->ports[i];
-            /* input port is part of one of bridge */
-            if (strcmp(port->name, port_name)==0) {
-                VLOG_DBG("[%s:%d]: Port %s is part of VRF %s", __FUNCTION__,
-                                __LINE__, port_name, vrf_name);
-                return 1;
-            }
-        }
-    }
-
-    VLOG_DBG("[%s:%d]: Port %s is NOT found in VRF %s", __FUNCTION__,
-            __LINE__, port_name, vrf_name);
-
-    return 0;
-}
-
 static void
 portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
 {
@@ -1281,12 +1364,14 @@ portd_intf_config_on_init (void)
     rta = (struct rtattr *)(((char *)&req) + NLMSG_ALIGN(req.hdr.nlmsg_len));
     rta->rta_len = RTA_LENGTH(4);
 
-    if (send(nl_sock, &req, req.hdr.nlmsg_len, 0) == -1) {
+    if (send(init_sock, &req, req.hdr.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to send message for link dump");
         return;
     }
     /* Process the response from kernel */
-    nl_msg_process(NULL);
+    VLOG_DBG("Interfaces dump request sent on init");
+
+    nl_msg_process(NULL, init_sock, true);
 }
 
 /* Checks to see if:
@@ -1310,15 +1395,17 @@ portd_reconfigure(void)
 
     portd_add_del_vrf();
 
-    /* In case the daemon restarts, ensure unused VLANs are deleted
-     * and IP addresses between DB and kernel are in sync */
+    /* In case the daemon restarts, ensure:
+     * 1. Unused internal VLANs are deleted.
+     * 2. IP addresses between DB and kernel are in sync.
+     * 3. Interfaces link state (up/down) are in sync with DB.
+     * 4. Intervlan interfaces on the kernel are in sync with DB.
+     */
     if (portd_config_on_init) {
+        /* Open an init sock to process reconfiguration */
+        portd_netlink_socket_open(&init_sock, true);
         portd_vlan_config_on_init();
         portd_ipaddr_config_on_init();
-        /*
-         * Get kernel dump of all the interfaces and configure
-         * up/down accordingly based on DB
-         */
         portd_intf_config_on_init();
     }
 
@@ -1337,6 +1424,8 @@ portd_reconfigure(void)
 
     if (portd_config_on_init) {
         portd_config_on_init = false;
+        /* Close the init socket as it is not needed anymore */
+        close(init_sock);
     }
     /* After all changes are done, update the seqno. */
     idl_seqno = new_idl_seqno;
@@ -1353,7 +1442,7 @@ portd_service_netlink_messages (void)
          * as per DB configurations
          */
         if (nl_sock > 0) {
-            nl_msg_process(NULL);
+            nl_msg_process(NULL, nl_sock, false);
         }
     }
 }

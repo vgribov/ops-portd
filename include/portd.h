@@ -38,6 +38,7 @@
 #define IPV6_ADDR_SCOPE_LINK 253
 
 #define PORTD_EMPTY_STRING ""
+#define INTERFACE_TYPE_VLAN "vlan"
 
 #define INET_ADDRSTRLEN     16
 #define INET_PREFIX_SIZE    18
@@ -119,8 +120,8 @@ void portd_add_vlan_interface(const char *parent_intf_name,
 void portd_del_vlan_interface(const char *vlan_intf_name);
 
 /* Netlink functions */
-void nl_msg_process(void *use_data);
-void parse_nl_ip_address_msg(struct nlmsghdr *nlh, int msglen,
-                             struct shash *kernel_port_list);
+void nl_msg_process(void *use_data, int sock, bool on_init);
+void parse_nl_ip_address_msg_on_init(struct nlmsghdr *nlh, int msglen,
+                                     struct shash *kernel_port_list);
 
 #endif /* PORTD_H_ */

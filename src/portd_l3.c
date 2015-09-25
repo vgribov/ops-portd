@@ -41,8 +41,17 @@ extern bool commit_txn;
 extern struct hmap all_vrfs;
 
 extern int nl_sock;
+extern int init_sock;
 static int portd_get_prefix(int family, char *ip_address, void *prefix,
                             unsigned char *prefixlen);
+extern bool
+portd_interface_type_internal_check(const struct ovsrec_port *port,
+                                    const char *interface_name);
+extern bool
+portd_port_in_bridge_check(const char *port_name,
+                           const char *bridge_name);
+extern bool
+portd_port_in_vrf_check(const char *port_name, const char *vrf_name);
 
 /*********** Begin Connected routes handling **************/
 
@@ -991,7 +1000,7 @@ portd_add_vlan_interface(const char *interface_name,
 
     struct rtattr *linkinfo = NLMSG_TAIL(&req.n);
     add_link_attr(&req.n, sizeof(req), IFLA_LINKINFO, NULL, 0);
-    add_link_attr(&req.n, sizeof(req), IFLA_INFO_KIND, "vlan", 4);
+    add_link_attr(&req.n, sizeof(req), IFLA_INFO_KIND, INTERFACE_TYPE_VLAN, 4);
 
     struct rtattr * data = NLMSG_TAIL(&req.n);
     add_link_attr(&req.n, sizeof(req), IFLA_INFO_DATA, NULL, 0);
@@ -1075,12 +1084,41 @@ find_or_create_kernel_port(struct shash *kernel_port_list, const char *ifname)
     return port;
 }
 
+static bool
+portd_kernel_ip_addr_lookup(struct kernel_port *kernel_port, char *ip_address, bool ipv6)
+{
+    struct net_address *addr;
+
+    if (ipv6) {
+        HMAP_FOR_EACH_WITH_HASH(addr, addr_node,
+                hash_string(ip_address, 0), &kernel_port->ip6addr) {
+            /*
+             * Match the IPv6 address in the existing hash map
+             */
+            if (addr->address && (strcmp(addr->address, ip_address) == 0)) {
+                return true;
+            }
+        }
+    } else {
+        HMAP_FOR_EACH_WITH_HASH(addr, addr_node,
+                hash_string(ip_address, 0), &kernel_port->ip4addr) {
+            /*
+             * Match the IPv4 address in the existing hash map
+             */
+            if (addr->address && (strcmp(addr->address, ip_address) == 0)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /*
  * Parse the Netlink response for ip address dump request.
  */
 void
-parse_nl_ip_address_msg(struct nlmsghdr *nlh, int msglen,
-             struct shash *kernel_port_list)
+parse_nl_ip_address_msg_on_init(struct nlmsghdr *nlh, int msglen,
+                                struct shash *kernel_port_list)
 {
     struct rtattr *rta;
     struct ifaddrmsg *ifa;
@@ -1118,11 +1156,13 @@ parse_nl_ip_address_msg(struct nlmsghdr *nlh, int msglen,
                             "%s/%d",recvip,ifa->ifa_prefixlen);
                     VLOG_DBG("Netlink message has IPv4 addr : %s",ip_address);
                     port = find_or_create_kernel_port(kernel_port_list, ifname);
-                    addr = xzalloc(sizeof *addr);
-                    addr->address = xstrdup(ip_address);
-                    hmap_insert(&port->ip4addr, &addr->addr_node,
-                            hash_string(addr->address, 0));
-                    add_to_list = true;
+                    if(!portd_kernel_ip_addr_lookup(port, ip_address, false)) {
+                        addr = xzalloc(sizeof *addr);
+                        addr->address = xstrdup(ip_address);
+                        hmap_insert(&port->ip4addr, &addr->addr_node,
+                                    hash_string(addr->address, 0));
+                        add_to_list = true;
+                    }
                 } else if (ifa->ifa_family == AF_INET6) {
                     inet_ntop(AF_INET6, RTA_DATA(rta), recvip,
                             INET6_ADDRSTRLEN);
@@ -1134,11 +1174,13 @@ parse_nl_ip_address_msg(struct nlmsghdr *nlh, int msglen,
                     }
                     VLOG_DBG("Netlink message has IPv6 addr : %s",ip_address);
                     port = find_or_create_kernel_port(kernel_port_list, ifname);
-                    addr = xzalloc(sizeof *addr);
-                    addr->address = xstrdup(ip_address);
-                    hmap_insert(&port->ip6addr, &addr->addr_node,
-                            hash_string(addr->address, 0));
-                    add_to_list = true;
+                    if(!portd_kernel_ip_addr_lookup(port, ip_address, true)) {
+                        addr = xzalloc(sizeof *addr);
+                        addr->address = xstrdup(ip_address);
+                        hmap_insert(&port->ip6addr, &addr->addr_node,
+                                hash_string(addr->address, 0));
+                        add_to_list = true;
+                    }
                 }
             }
         }
@@ -1178,7 +1220,7 @@ portd_populate_kernel_ip_addr(int family, struct shash *kernel_port_list)
     rta = (struct rtattr *)(((char *)&req) + NLMSG_ALIGN(req.n.nlmsg_len));
     rta->rta_len = RTA_LENGTH(bytelen);
 
-    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+    if (send(init_sock, &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to send message for IP addr dump (%s)",
                  strerror(errno));
         return;
@@ -1187,7 +1229,7 @@ portd_populate_kernel_ip_addr(int family, struct shash *kernel_port_list)
             family == AF_INET? "IPv4" : "IPv6");
 
     /* Process the response from kernel */
-    nl_msg_process(kernel_port_list);
+    nl_msg_process(kernel_port_list, init_sock, true);
 }
 
 /*
@@ -1240,6 +1282,13 @@ portd_populate_db_ip_addr(struct shash *db_port_list)
                 addr->address = xstrdup(port_row->ip6_address_secondary[k]);
                 hmap_insert(&db_port->secondary_ip6addr, &addr->addr_node,
                         hash_string(addr->address, 0));
+            }
+            if (portd_interface_type_internal_check(port_row, port_row->name) &&
+                portd_port_in_bridge_check(port_row->name, DEFAULT_BRIDGE_NAME) &&
+                portd_port_in_vrf_check(port_row->name, DEFAULT_VRF_NAME)) {
+                db_port->type = xstrdup(OVSREC_INTERFACE_TYPE_INTERNAL);;
+            } else {
+                db_port->type = NULL;
             }
             shash_add_once(db_port_list, port_row->name, db_port);
             VLOG_DBG("L3 interface '%s' added to DB port list",
