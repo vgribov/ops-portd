@@ -112,6 +112,7 @@ void portd_add_ipv4_addr(struct port *port);
 void portd_add_ipv6_addr(struct port *port);
 void portd_add_ipaddr(struct port *port);
 void portd_ipaddr_config_on_init(void);
+struct ovsrec_port* portd_port_db_lookup(const char *);
 
 /* Inter-VLAN functions */
 void portd_add_vlan_interface(const char *parent_intf_name,

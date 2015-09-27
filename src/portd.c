@@ -85,7 +85,7 @@ static void portd_interface_up_down(const char *interface_name, const char *stat
 /*
  * Lookup port entry from DB
  */
-static struct ovsrec_port*
+struct ovsrec_port*
 portd_port_db_lookup(const char *name)
 {
     const struct ovsrec_port *port_row;

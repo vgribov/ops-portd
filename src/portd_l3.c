@@ -109,7 +109,8 @@ apply_mask_ipv4 (struct prefix_ipv4 *p)
  * will be the egress port for the subnet
  */
 static int
-portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
+portd_add_connected_route (char* ip_address, struct ovsrec_port *ovs_port,
+                           bool is_v4)
 {
     const struct ovsrec_route *row = NULL;
     const struct ovsrec_vrf *row_vrf = NULL;
@@ -147,11 +148,11 @@ portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
          * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
          * - Convert it back to string to write to DB
          */
-        retval = portd_get_prefix(AF_INET, ovs_port->ip4_address,
+        retval = portd_get_prefix(AF_INET, ip_address,
                                   &v4_prefix.prefix, &v4_prefix.prefixlen);
         if (retval) {
             VLOG_ERR("Error converting DB string to prefix: %s",
-                     ovs_port->ip4_address);
+                     ip_address);
             return retval;
         }
         apply_mask_ipv4(&v4_prefix);
@@ -173,11 +174,11 @@ portd_add_connected_route (struct ovsrec_port *ovs_port, bool is_v4)
          * - Apply the mask i.e. A.B.C.D/24 to A.B.C.0/24
          * - Convert it back to string to write to DB
          */
-        retval = portd_get_prefix(AF_INET6, ovs_port->ip6_address,
+        retval = portd_get_prefix(AF_INET6, ip_address,
                                   &v6_prefix.prefix, &v6_prefix.prefixlen);
         if (retval) {
             VLOG_ERR("Error converting DB string to prefix: %s",
-                     ovs_port->ip6_address);
+                     ip_address);
             return retval;
         }
         apply_mask_ipv6(&v6_prefix);
@@ -226,7 +227,8 @@ is_route_matched (const struct ovsrec_route *row_route, char *prefix_str,
         (row_route->sub_address_family == NULL ||
          !strcmp(row_route->sub_address_family,
                 OVSREC_ROUTE_SUB_ADDRESS_FAMILY_UNICAST)) &&
-        !strcmp(row_route->nexthops[0]->ports[0]->name, port_name)) {
+        ((!row_route->nexthops[0]->ports) ||
+        !strcmp(row_route->nexthops[0]->ports[0]->name, port_name))) {
         return true;
     }
     return false;
@@ -441,6 +443,7 @@ portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
     struct in_addr ipv4;
     struct in6_addr ipv6;
     unsigned char prefixlen, *ipaddr = NULL;
+    struct ovsrec_port* port;
 
     memset (&req, 0, sizeof(req));
 
@@ -498,6 +501,40 @@ portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
              (cmd == RTM_NEWADDR) ? "added" : "deleted",
              ip_address, prefixlen, secondary ? "secondary":"primary",
              port_name);
+
+    /*
+     * Add/Delete the route in the OVSDB
+     */
+    if (cmd == RTM_NEWADDR) {
+        port = portd_port_db_lookup(port_name);
+        if (family == AF_INET) {
+
+            /*
+             * Add the new IP route into OVSDB
+             */
+            portd_add_connected_route(ip_address, port, true);
+        } else {
+
+            /*
+             * Add the new IPv6 route into OVSDB
+             */
+            portd_add_connected_route(ip_address, port, false);
+        }
+    } else {
+        if (family == AF_INET) {
+
+            /*
+             * Delete the new IP route into OVSDB
+             */
+            portd_del_connected_route(ip_address, (char*)port_name, true);
+        } else {
+
+            /*
+             * Delete the new IPv6 route into OVSDB
+             */
+            portd_del_connected_route(ip_address, (char*)port_name, false);
+        }
+    }
 }
 
 static struct net_address *
@@ -831,37 +868,21 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
             if (strcmp(port->ip4_address, port_row->ip4_address) != 0) {
                 portd_set_ipaddr(RTM_DELADDR, port->name, port->ip4_address,
                                  AF_INET, false);
-                /*
-                 * Delete the old route
-                 */
-                portd_del_connected_route(port->ip4_address, port->name, true);
                 free(port->ip4_address);
 
                 port->ip4_address = xstrdup(port_row->ip4_address);
                 portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip4_address,
                                  AF_INET, false);
-                /*
-                 * Add the new route
-                 */
-                portd_add_connected_route(port_row, true);
             }
         } else {
             port->ip4_address = xstrdup(port_row->ip4_address);
             portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip4_address,
                              AF_INET, false);
-            /*
-             * Add a new route
-             */
-            portd_add_connected_route(port_row, true);
         }
     } else {
         if (port->ip4_address != NULL) {
             portd_set_ipaddr(RTM_DELADDR, port->name, port->ip4_address,
                              AF_INET, false);
-            /*
-             * Delete the route
-             */
-            portd_del_connected_route(port->ip4_address, port->name, true);
             free(port->ip4_address);
             port->ip4_address = NULL;
         }
@@ -872,37 +893,21 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
             if (strcmp(port->ip6_address, port_row->ip6_address) !=0) {
                 portd_set_ipaddr(RTM_DELADDR, port->name, port->ip6_address,
                                  AF_INET6, false);
-                /*
-                 * Delete the old route
-                 */
-                portd_del_connected_route(port->ip6_address, port->name, false);
                 free(port->ip6_address);
 
                 port->ip6_address = xstrdup(port_row->ip6_address);
                 portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip6_address,
                                  AF_INET6, false);
-                /*
-                 * Add the new route
-                 */
-                portd_add_connected_route(port_row, false);
             }
         } else {
             port->ip6_address = xstrdup(port_row->ip6_address);
             portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip6_address,
                              AF_INET6, false);
-            /*
-             * Add the new route
-             */
-            portd_add_connected_route(port_row, false);
         }
     } else {
         if (port->ip6_address != NULL) {
             portd_set_ipaddr(RTM_DELADDR, port->name, port->ip6_address,
                              AF_INET6, false);
-            /*
-             * Delete the route
-             */
-            portd_del_connected_route(port->ip6_address, port->name, false);
             free(port->ip6_address);
             port->ip6_address = NULL;
         }
