@@ -52,7 +52,7 @@
 #include "unixctl.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
-#include "openhalon-dflt.h"
+#include "openswitch-dflt.h"
 #include "coverage.h"
 #include "hash.h"
 #include "svec.h"

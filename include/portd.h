@@ -23,7 +23,7 @@
 #include "hmap.h"
 #include "shash.h"
 #include "vswitch-idl.h"
-#include "openhalon-idl.h"
+#include "openswitch-idl.h"
 
 #define PORTD_DISABLE_ROUTING 0
 #define PORTD_ENABLE_ROUTING 1
