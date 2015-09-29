@@ -122,7 +122,7 @@ portd_add_connected_route (char* ip_address, struct ovsrec_port *ovs_port,
     int retval;
 
     /*
-     * HALON_TODO: For now we support only 1 VRF in the system.
+     * TODO: For now we support only 1 VRF in the system.
      * When we have support for multiple VRF, then fetch the
      * correct VRF for the port
      */
@@ -425,7 +425,7 @@ portd_get_prefix(int family, char *ip_address, void *prefix,
     return 0;
 }
 
-/* HALON_TODO - ipv6 secondary address also shows up as primary in 'ip -6 addr show' - fix */
+/* TODO - ipv6 secondary address also shows up as primary in 'ip -6 addr show' - fix */
 
 /* Set IP address on Linux interface using netlink sockets */
 static void

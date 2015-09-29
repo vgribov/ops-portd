@@ -499,7 +499,7 @@ portd_init(const char *remote)
 {
     idl = ovsdb_idl_create(remote, &ovsrec_idl_class, false, true);
     idl_seqno = ovsdb_idl_get_seqno(idl);
-    ovsdb_idl_set_lock(idl, "halon_portd");
+    ovsdb_idl_set_lock(idl, "ops_portd");
     ovsdb_idl_verify_write_only(idl);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_subsystem);
@@ -1455,7 +1455,7 @@ portd_run(void)
     if (ovsdb_idl_is_lock_contended(idl)) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
 
-        VLOG_ERR_RL(&rl, "another halon-portd process is running, "
+        VLOG_ERR_RL(&rl, "another ops-portd process is running, "
                     "disabling this process until it goes away");
         return;
     } else if (!ovsdb_idl_has_lock(idl)) {
@@ -1475,7 +1475,7 @@ portd_run(void)
         ovsdb_idl_txn_commit_block(txn);
     }
     ovsdb_idl_txn_destroy(txn);
-    VLOG_INFO_ONCE("%s (Halon portd) %s", program_name, VERSION);
+    VLOG_INFO_ONCE("%s (ops-portd) %s", program_name, VERSION);
 
     /* OPS_TODO - verify db write was successful, else retry. */
     /* OPS_TODO - cur_cfg delete once after system init */
@@ -1507,7 +1507,7 @@ portd_unixctl_dump(struct unixctl_conn *conn, int argc OVS_UNUSED,
 static void
 usage(void)
 {
-    printf("%s: Halon portd daemon\n"
+    printf("%s: OPS portd daemon\n"
             "usage: %s [OPTIONS] [DATABASE]\n"
             "where DATABASE is a socket on which ovsdb-server is listening\n"
             "      (default: \"unix:%s/db.sock\").\n",
@@ -1592,7 +1592,7 @@ parse_options(int argc, char *argv[], char **unixctl_pathp)
 }
 
 static void
-halon_portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
+ops_portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
         const char *argv[] OVS_UNUSED, void *exiting_)
 {
     bool *exiting = exiting_;
@@ -1622,7 +1622,7 @@ main(int argc, char *argv[])
     if (retval) {
         exit(EXIT_FAILURE);
     }
-    unixctl_command_register("exit", "", 0, 0, halon_portd_exit, &exiting);
+    unixctl_command_register("exit", "", 0, 0, ops_portd_exit, &exiting);
 
     portd_init(remote);
     free(remote);
