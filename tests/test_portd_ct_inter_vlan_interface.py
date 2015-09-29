@@ -1,6 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 
-# Copyright (C) 2015 Hewlett Packard Enterprise Development LP
+# (c) Copyright 2015 Hewlett Packard Enterprise Development LP
 # All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -20,7 +20,8 @@ from opsvsi.opsvsitest import *
 
 vlan_interface = "vlan10"
 
-class Inter_VLAN_Interface_CT( OpsVsiTest ):
+
+class Inter_VLAN_Interface_CT(OpsVsiTest):
 
     def setupNet(self):
         host_opts = self.getHostOpts()
@@ -35,7 +36,7 @@ class Inter_VLAN_Interface_CT( OpsVsiTest ):
             Create/Delete inter-VLAN interface in kernel, when configured in
             Openswitch.
         '''
-        s1 = self.net.switches[ 0 ]
+        s1 = self.net.switches[0]
 
         s1.cmdCLI("configure terminal")
 
@@ -44,44 +45,42 @@ class Inter_VLAN_Interface_CT( OpsVsiTest ):
         s1.cmd("ip netns exec swns bash")
         ret = s1.cmd("ifconfig -a " + vlan_interface)
         assert 'vlan10' in ret, \
-                'FAIL: inter-VLAN interface creation failed.'
+            'FAIL: inter-VLAN interface creation failed.'
         info('### PASS: inter-VLAN interface creation test passed. ###\n\n')
-
 
         info('### CHECK: IPv4 address add to inter-VLAN interface. ###\n\n')
         s1.cmdCLI("ip address 192.168.0.1/30")
         time.sleep(2)
         ret = s1.cmd("ip addr show " + vlan_interface)
         assert '192.168.0.1' in ret, \
-                'FAIL: test to add IPv4 address to inter-VLAN interface failed.'
+            'FAIL: test to add IPv4 address to inter-VLAN interface failed.'
         info('### PASS: IPv4 address add to inter-VLAN interface. ###\n\n')
 
-
-        info('### CHECK: IPv4 address delete from inter-VLAN interface. ###\n\n')
+        info('### CHECK: IPv4 address delete from '
+             'inter-VLAN interface. ###\n\n')
         s1.cmdCLI("no ip address 192.168.0.1/30")
         time.sleep(2)
         ret = s1.cmd("ip addr show " + vlan_interface)
         assert '192.168.0.1' not in ret, \
-                'FAIL: test to add IPv4 address to inter-VLAN interface failed.'
+            'FAIL: test to add IPv4 address to inter-VLAN interface failed.'
         info('### PASS: IPv4 address delete to inter-VLAN interface. ###\n\n')
-
 
         info('### CHECK: IPv6 address add to inter-VLAN interface. ###\n\n')
         s1.cmdCLI("ipv6 address 2000::1/120")
         time.sleep(2)
         ret = s1.cmd("ip addr show  " + vlan_interface)
         assert '2000::1' in ret, \
-                'FAIL: test to add IPv6 address to inter-VLAN interface failed.'
+            'FAIL: test to add IPv6 address to inter-VLAN interface failed.'
         info('### PASS: IPv6 address add to inter-VLAN interface. ###\n\n')
 
-        info('### CHECK: IPv6 address delete to inter-VLAN interface. ###\n\n')
+        info('### CHECK: IPv6 address delete to '
+             'inter-VLAN interface. ###\n\n')
         s1.cmdCLI("no ipv6 address 2000::1/120")
         time.sleep(2)
         ret = s1.cmd("ip addr show  " + vlan_interface)
         assert '2000::1' not in ret, \
-                'FAIL: test to add IPv6 address to inter-VLAN interface failed.'
+            'FAIL: test to add IPv6 address to inter-VLAN interface failed.'
         info('### PASS: IPv6 address delete to inter-VLAN interface. ###\n\n')
-
 
         info('### CHECK: inter-VLAN interface deletion. ###\n')
         # Checking inter-VLAN interface deletion in CLI
@@ -90,13 +89,14 @@ class Inter_VLAN_Interface_CT( OpsVsiTest ):
         s1.cmd("ip netns exec swns bash")
         ret = s1.cmd("ifconfig -a " + vlan_interface)
         assert 'does not exist' in ret, \
-                'FAIL: inter-VLAN interface deletion test failed.'
+            'FAIL: inter-VLAN interface deletion test failed.'
         info('### Inter-VLAN interface deletion test passed. ###\n\n')
 
-
-        #Cleanup
+        # Cleanup
         s1.cmdCLI("exit")
-        info('########## Inter-VLAN interface CLI validations passed. ##########\n\n')
+        info('########## Inter-VLAN interface CLI validations '
+             'passed. ##########\n\n')
+
 
 class Test_portd_intervlan_interface:
 

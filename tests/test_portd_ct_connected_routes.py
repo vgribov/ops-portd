@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-# Copyright (C) 2015 Hewlett Packard Enterprise Development LP
+# (c) Copyright 2015 Hewlett Packard Enterprise Development LP
 # All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -18,7 +18,8 @@
 from opsvsi.docker import *
 from opsvsi.opsvsitest import *
 
-class connectedRoutesCTTest( OpsVsiTest ):
+
+class connectedRoutesCTTest(OpsVsiTest):
 
     def setupNet(self):
         host_opts = self.getHostOpts()
@@ -29,9 +30,10 @@ class connectedRoutesCTTest( OpsVsiTest ):
                            controller=None, build=True)
 
     def testConfigure(self):
-        info('\n########## Test portd addition of connected routes ##########\n')
+        info('\n########## Test portd addition of '
+             'connected routes ##########\n')
         info('\n### Configuring the topology ###\n')
-        s1 = self.net.switches[ 0 ]
+        s1 = self.net.switches[0]
 
         s1.ovscmd("/usr/bin/ovs-vsctl set interface 1 user_config:admin=up")
         s1.ovscmd("/usr/bin/ovs-vsctl set interface 2 user_config:admin=up")
@@ -57,7 +59,7 @@ class connectedRoutesCTTest( OpsVsiTest ):
 
     def testConnectedRoutes(self):
         info('\n\n### Verify connected routes are present in db ###\n')
-        s1 = self.net.switches[ 0 ]
+        s1 = self.net.switches[0]
 
         # Parse the "ovsdb-client dump" output and extract the lines between
         # "Route table" and "Route_Map table". This section will have all the
@@ -69,29 +71,29 @@ class connectedRoutesCTTest( OpsVsiTest ):
         for line in lines:
             if check:
                 if ('connected' in line and 'unicast' in line and
-                '10.0.10.0/24' in line and 'true' in line):
-                    #print '\nIPv4 connected route found. Success!\n'
-                    #print line
+                        '10.0.10.0/24' in line and 'true' in line):
+                    # print '\nIPv4 connected route found. Success!\n'
+                    # print line
                     count = count + 1
-                    #print '\n'
+                    # print '\n'
                 elif ('connected' in line and 'unicast' in line and
-                '10.0.20.0/24' in line and 'true' in line):
-                    #print '\nIPv4 connected route found. Success!\n'
-                    #print line
+                      '10.0.20.0/24' in line and 'true' in line):
+                    # print '\nIPv4 connected route found. Success!\n'
+                    # print line
                     count = count + 1
-                    #print '\n'
+                    # print '\n'
                 elif ('connected' in line and 'unicast' in line and
-                '2000::/120' in line and 'true' in line):
-                    #print '\nIPv6 connected route found. Success!\n'
-                    #print line
+                      '2000::/120' in line and 'true' in line):
+                    # print '\nIPv6 connected route found. Success!\n'
+                    # print line
                     count = count + 1
-                    #print '\n'
+                    # print '\n'
                 elif ('connected' in line and 'unicast' in line and
-                '2001::/120' in line and 'true' in line):
-                    #print '\nIPv6 connected route found. Success!\n'
-                    #print line
+                      '2001::/120' in line and 'true' in line):
+                    # print '\nIPv6 connected route found. Success!\n'
+                    # print line
                     count = count + 1
-                    #print '\n'
+                    # print '\n'
             if 'Route table' in line:
                 check = True
             if 'Route_Map table' in line:
@@ -99,6 +101,7 @@ class connectedRoutesCTTest( OpsVsiTest ):
         assert count == 4, "Connected routes not populated in DB"
 
         info('########## Test Passed ##########\n\n\n')
+
 
 class Test_portd_connected_routes:
 
@@ -117,7 +120,6 @@ class Test_portd_connected_routes:
     def test_testZebra(self):
         # Function to validate connected routes in db
         self.test.testConnectedRoutes()
-        #CLI(self.test.net)
 
     def __del__(self):
         del self.test
