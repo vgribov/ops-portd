@@ -51,6 +51,8 @@
 #define NLMSG_TAIL(nmsg) \
         ((struct rtattr *) (((void *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
 
+#define VTYSH_STR_EQ(s1, s2)      ((strlen((s1)) == strlen((s2))) && \
+                                   (!strncmp((s1), (s2), strlen((s2)))))
 struct port {
     struct hmap_node port_node; /* Element in struct vrf's "ports" hmap. */
     char *name;
