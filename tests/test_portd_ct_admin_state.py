@@ -77,27 +77,20 @@ class adminstateupdateCTTest( OpsVsiTest ):
         info('### Port and interface 1 created successfully ###\n');
 
         # Verify the port hw_config is down and interface is down by default
-        info('##### Verify the port is up and interface is down by'\
+        info('##### Verify the port is down by'\
              ' default ####\n')
-        cmd = "/usr/bin/ovs-vsctl get interface %s hw_intf_config" % first_interface
-        output = s1.ovscmd(cmd)
-        assert interface_down_string in output, 'Incorrect interface default state'
-        info('### Default state of interface is down as expected ###\n');
         cmd = "/usr/bin/ovs-vsctl get port %s hw_config" % first_interface
         output = s1.ovscmd(cmd)
         assert port_down in output, 'Incorrect port default state'
         info('### Default state of port is down as expected ###\n');
 
         # Verify the interface associated with the port goes down when port is disabled
-        info('##### Verify the interface associated with the port'\
+        info('##### Verify port is up on no shut and'\
              ' goes down when port is disabled #####\n')
         s1.cmdCLI("configure terminal")
         s1.cmdCLI("interface 1")
         s1.cmdCLI("no shutdown")
         s1.cmdCLI("exit")
-        cmd = "/usr/bin/ovs-vsctl get interface %s hw_intf_config" % first_interface
-        output = s1.ovscmd(cmd)
-        assert interface_up_string in output, 'Interface state does not change'
         cmd = "/usr/bin/ovs-vsctl get port %s hw_config" % first_interface
         output = s1.ovscmd(cmd)
         assert port_up in output, 'Port state is set to down'
@@ -110,12 +103,6 @@ class adminstateupdateCTTest( OpsVsiTest ):
         cmd = "/usr/bin/ovs-vsctl get port %s hw_config" % first_interface
         output = s1.ovscmd(cmd)
         assert port_down in output, 'Port state remains up'
-        # Verify the interface associated to the port is down
-        cmd = "/usr/bin/ovs-vsctl get interface %s hw_intf_config" % first_interface
-        output = s1.ovscmd(cmd)
-        assert interface_down_string in output, 'Interface state does not change'
-        info('### Interface state changed to down as the port is down ###\n');
-        cmd = "/usr/bin/ovs-vsctl set port %s admin=up" % first_interface
 
         # Verify port hw_config is set to false when interface
         # user_config is down for L3 and VLAN interfaces
@@ -125,59 +112,17 @@ class adminstateupdateCTTest( OpsVsiTest ):
         s1.cmdCLI("interface 1")
         s1.cmdCLI("no shutdown")
         s1.cmdCLI("exit")
-        cmd = "/usr/bin/ovs-vsctl get interface %s hw_intf_config" % first_interface
-        output = s1.ovscmd(cmd)
-        assert interface_up_string in output, 'Interface state does not change to up'
         cmd = "/usr/bin/ovs-vsctl get port %s hw_config" % first_interface
         output = s1.ovscmd(cmd)
         assert port_up in output, 'Port state is set to down'
         # Change the user_config of interface to down
         cmd = "/usr/bin/ovs-vsctl set interface %s user_config=admin=down" % first_interface
         s1.ovscmd(cmd)
-        # Verify the interface is down
-        cmd = "/usr/bin/ovs-vsctl get interface %s hw_intf_config" % first_interface
-        output = s1.ovscmd(cmd)
-        assert interface_down_string in output, 'Interface state does not change'
         # Verify the port is down
         cmd = "/usr/bin/ovs-vsctl get port %s hw_config" % first_interface
         output = s1.ovscmd(cmd)
         assert port_down in output, 'Port state remains up'
         info('### Port state changed to down as the port is down ###\n');
-
-        # Verify multiple interfaces associated with LAG port goes down when LAG port is disabled
-        info('Verify multiple interfaces associated with LAG port'\
-             ' goes down when LAG port is disabled\n')
-        s1.cmdCLI("configure terminal")
-        s1.cmdCLI("interface lag 1")
-        s1.cmdCLI("exit")
-        cmd = "interface %s" % second_interface
-        s1.cmdCLI(cmd)
-        s1.cmdCLI("no shutdown")
-        s1.cmdCLI("lag 1")
-        s1.cmdCLI("exit")
-        cmd = "interface %s" % third_interface
-        s1.cmdCLI(cmd)
-        s1.cmdCLI("no shutdown")
-        s1.cmdCLI("lag 1")
-        s1.cmdCLI("exit")
-        cmd = "interface %s" % fourth_interface
-        s1.cmdCLI(cmd)
-        s1.cmdCLI("no shutdown")
-        s1.cmdCLI("lag 1")
-        s1.cmdCLI("exit")
-        s1.cmdCLI("exit")
-        cmd = "/usr/bin/ovs-vsctl set port %s admin=down" % lag_interface
-        s1.ovscmd(cmd)
-        cmd = "/usr/bin/ovs-vsctl get interface %s hw_intf_config" % second_interface
-        output = s1.ovscmd(cmd)
-        assert interface_down_string in output, 'Interface state does not change'
-        cmd = "/usr/bin/ovs-vsctl get interface %s hw_intf_config" % third_interface
-        output = s1.ovscmd(cmd)
-        assert interface_down_string in output, 'Interface state does not change'
-        cmd = "/usr/bin/ovs-vsctl get interface %s hw_intf_config" % fourth_interface
-        output = s1.ovscmd(cmd)
-        assert interface_down_string in output, 'Interface state does not change'
-        info('#### All interfaces under the lag go down as soon as lag is down #####')
 
 class Test_portd_admin_state_update:
 

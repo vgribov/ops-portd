@@ -122,7 +122,7 @@ portd_add_connected_route (char* ip_address, struct ovsrec_port *ovs_port,
     int retval;
 
     /*
-     * TODO: For now we support only 1 VRF in the system.
+     * FIXME: For now we support only 1 VRF in the system.
      * When we have support for multiple VRF, then fetch the
      * correct VRF for the port
      */
@@ -425,12 +425,12 @@ portd_get_prefix(int family, char *ip_address, void *prefix,
     return 0;
 }
 
-/* TODO - ipv6 secondary address also shows up as primary in 'ip -6 addr show' - fix */
+/* FIXME - ipv6 secondary address also shows up as primary in 'ip -6 addr show' - fix */
 
-/* Set IP address on Linux interface using netlink sockets */
-static void
-portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
-                 int family, bool secondary)
+/* Function to send netlink message to add ip address to kernel */
+void
+nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
+        int family, bool secondary)
 {
     int buflen;
     struct rtattr *rta;
@@ -443,7 +443,6 @@ portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
     struct in_addr ipv4;
     struct in6_addr ipv6;
     unsigned char prefixlen, *ipaddr = NULL;
-    struct ovsrec_port* port;
 
     memset (&req, 0, sizeof(req));
 
@@ -501,6 +500,16 @@ portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
              (cmd == RTM_NEWADDR) ? "added" : "deleted",
              ip_address, prefixlen, secondary ? "secondary":"primary",
              port_name);
+    return;
+}
+/* Set IP address on Linux interface using netlink sockets */
+static void
+portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
+                 int family, bool secondary)
+{
+    struct ovsrec_port* port;
+
+    nl_add_ip_address(cmd, port_name, ip_address, family, secondary);
 
     /*
      * Add/Delete the route in the OVSDB
@@ -1035,7 +1044,7 @@ portd_add_vlan_interface(const char *interface_name,
  * Return:
  * Desc:
  *      Delete VLAN interface <vlan_interface_name>
- * OPENSWITCH_TODO:
+ * FIXME:
  *      Code in this function can delete non-vlan interfaces as well. Generalize
  *      the name.
  */

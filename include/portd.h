@@ -30,6 +30,7 @@
 #define PORTD_POLL_INTERVAL 5
 #define PORTD_IPV4_MAX_LEN 32
 #define PORTD_IPV6_MAX_LEN 128
+#define PORTD_VLAN_ID_STRING_MAX_LEN 16
 #define PORT_INTERFACE_ADMIN_UP "up" // Interface admin state "up"
 #define PORT_INTERFACE_ADMIN_DOWN "down" // Interface admin state "down"
 #define LOOPBACK_INTERFACE_NAME "lo"
@@ -60,6 +61,7 @@ struct port {
     const struct ovsrec_port *cfg;
 
     int internal_vid;
+    bool hw_cfg_enable;
     char *ip4_address;
     char *ip6_address;
     struct hmap secondary_ip4addr; /* List of secondary IP address*/
@@ -126,5 +128,7 @@ void portd_del_vlan_interface(const char *vlan_intf_name);
 void nl_msg_process(void *use_data, int sock, bool on_init);
 void parse_nl_ip_address_msg_on_init(struct nlmsghdr *nlh, int msglen,
                                      struct shash *kernel_port_list);
+void nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
+                       int family, bool secondary);
 
 #endif /* PORTD_H_ */
