@@ -1251,7 +1251,8 @@ portd_populate_kernel_ip_addr(int family, struct shash *kernel_port_list)
  * VRFs and makes a DB list of IP addresses for each interface.
  */
 static void
-portd_populate_db_ip_addr(struct shash *db_port_list)
+portd_populate_db_ip_addr(struct shash *db_port_list,
+                          struct shash *kernel_port_list)
 {
     struct port *db_port;
     struct vrf *vrf, *next_vrf;
@@ -1264,6 +1265,12 @@ portd_populate_db_ip_addr(struct shash *db_port_list)
     HMAP_FOR_EACH_SAFE (vrf, next_vrf, node, &all_vrfs) {
         for (i = 0; i < vrf->cfg->n_ports; i++) {
             port_row = vrf->cfg->ports[i];
+            if (!shash_find_data(kernel_port_list, port_row->name)) {
+                /* Must be a newly added Layer 3 interface.
+                 * We will ignore these and only consider
+                 * previously configured Layer 3 interfaces */
+                continue;
+            }
             db_port = xzalloc(sizeof *db_port);
             db_port->vrf = vrf;
             db_port->name = xstrdup(port_row->name);
@@ -1349,7 +1356,6 @@ portd_ipaddr_config_on_init(void)
     struct kernel_port *kernel_port;
     struct shash_node *node, *next;
     struct net_address *addr, *next_addr;
-    bool add_to_local_cache = false;
 
     /* Initialize and populate the list of kernel IP addresses */
     shash_init(&kernel_port_list);
@@ -1357,7 +1363,7 @@ portd_ipaddr_config_on_init(void)
     portd_populate_kernel_ip_addr(AF_INET6, &kernel_port_list);
     /* Initialize and populate the list of DB IP addresses */
     shash_init(&db_port_list);
-    portd_populate_db_ip_addr(&db_port_list);
+    portd_populate_db_ip_addr(&db_port_list, &kernel_port_list);
 
     if (VLOG_IS_DBG_ENABLED()) {
         VLOG_DBG("Dump of kernel ports");
@@ -1412,70 +1418,65 @@ portd_ipaddr_config_on_init(void)
                 portd_set_ipaddr(RTM_DELADDR, kernel_port->name,
                         addr->address, AF_INET6, false);
             }
-            continue;
         }
-        /* If port exists in the DB, then we will add to local cache.
-         * This is needed so that portd does not reconfigure the
-         * interfaces again. */
-        add_to_local_cache = true;
+        else {
+            /* Remove all the IP addresses from the kernel that are not
+             * present in the DB */
+            HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                               &kernel_port->ip4addr) {
+                if (!portd_find_ip_addr_db(db_port,
+                        addr->address, false)) {
+                    portd_set_ipaddr(RTM_DELADDR, db_port->name,
+                            addr->address, AF_INET, false);
+                }
+            }
 
-        /* Remove all the IP addresses from the kernel that are not
-         * present in the DB */
-        HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
-                           &kernel_port->ip4addr) {
-            if (!portd_find_ip_addr_db(db_port,
-                    addr->address, false)) {
-                portd_set_ipaddr(RTM_DELADDR, db_port->name,
-                        addr->address, AF_INET, false);
+            HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                               &kernel_port->ip6addr) {
+                if (!portd_find_ip_addr_db(db_port,
+                        addr->address, true)) {
+                    portd_set_ipaddr(RTM_DELADDR, db_port->name,
+                            addr->address, AF_INET6, false);
+                }
             }
-        }
 
-        HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
-                           &kernel_port->ip6addr) {
-            if (!portd_find_ip_addr_db(db_port,
-                    addr->address, true)) {
-                portd_set_ipaddr(RTM_DELADDR, db_port->name,
-                        addr->address, AF_INET6, false);
+            /* Check for IP addresses which are not present and add them */
+            if (db_port->ip4_address) {
+                if (!portd_find_ip_addr_kernel(kernel_port,
+                        db_port->ip4_address, false)) {
+                    portd_set_ipaddr(RTM_NEWADDR, db_port->name,
+                            db_port->ip4_address, AF_INET, false);
+                }
             }
-        }
-
-        /* Check for IP addresses which are not present and add them */
-        if (db_port->ip4_address) {
-            if (!portd_find_ip_addr_kernel(kernel_port,
-                    db_port->ip4_address, false)) {
-                portd_set_ipaddr(RTM_NEWADDR, db_port->name,
-                        db_port->ip4_address, AF_INET, false);
+            if (db_port->ip6_address) {
+                if (!portd_find_ip_addr_kernel(kernel_port,
+                        db_port->ip6_address, true)) {
+                    portd_set_ipaddr(RTM_NEWADDR, db_port->name,
+                            db_port->ip6_address, AF_INET6, false);
+                }
             }
-        }
-        if (db_port->ip6_address) {
-            if (!portd_find_ip_addr_kernel(kernel_port,
-                    db_port->ip6_address, true)) {
-                portd_set_ipaddr(RTM_NEWADDR, db_port->name,
-                        db_port->ip6_address, AF_INET6, false);
+            HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                               &db_port->secondary_ip4addr) {
+                if (!portd_find_ip_addr_kernel(kernel_port,
+                        addr->address, false)) {
+                    portd_set_ipaddr(RTM_NEWADDR, db_port->name,
+                            addr->address, AF_INET, true);
+                }
             }
-        }
-        HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
-                           &db_port->secondary_ip4addr) {
-            if (!portd_find_ip_addr_kernel(kernel_port,
-                    addr->address, false)) {
-                portd_set_ipaddr(RTM_NEWADDR, db_port->name,
-                        addr->address, AF_INET, true);
+            HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
+                               &db_port->secondary_ip6addr) {
+                if (!portd_find_ip_addr_kernel(kernel_port,
+                        addr->address, true)) {
+                    portd_set_ipaddr(RTM_NEWADDR, db_port->name,
+                            addr->address, AF_INET6, true);
+                }
             }
-        }
-        HMAP_FOR_EACH_SAFE(addr, next_addr, addr_node,
-                           &db_port->secondary_ip6addr) {
-            if (!portd_find_ip_addr_kernel(kernel_port,
-                    addr->address, true)) {
-                portd_set_ipaddr(RTM_NEWADDR, db_port->name,
-                        addr->address, AF_INET6, true);
-            }
-        }
-
-         if (add_to_local_cache) {
-            add_to_local_cache = false;
+            /* Add DB port to local cache to avoid
+             * reconfiguration in kernel */
             portd_add_port_to_cache(db_port);
         }
-        /* Free kernel port */
+
+         /* Free kernel port */
         hmap_destroy(&kernel_port->ip4addr);
         hmap_destroy(&kernel_port->ip6addr);
         free(kernel_port->name);

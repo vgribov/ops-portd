@@ -55,7 +55,7 @@
 #include "openswitch-dflt.h"
 #include "coverage.h"
 #include "hash.h"
-#include "svec.h"
+#include "vlan-bitmap.h"
 
 #include "portd.h"
 
@@ -1197,25 +1197,32 @@ portd_port_create(struct vrf *vrf, struct ovsrec_port *port_row)
 static int
 portd_alloc_internal_vlan(void)
 {
-    int i, ret = -1;
+    int i, j;
     const struct ovsrec_bridge *br_row = NULL;
     const struct ovsrec_system *sys = NULL;
-    struct svec vlans;
-    char vlan_name[16];
+    unsigned long *vlans_bmp;
+    struct smap sys_other_config_smap;
+    bool ascending;
+    int vlan_allocated = -1;
+
     int min_internal_vlan, max_internal_vlan;
     const char *internal_vlan_policy;
 
     sys = ovsrec_system_first(idl);
 
     if (sys) {
-        min_internal_vlan = smap_get_int(&sys->other_config,
-                     SYSTEM_OTHER_CONFIG_MAP_MIN_INTERNAL_VLAN,
-                     DFLT_SYSTEM_OTHER_CONFIG_MAP_MIN_INTERNAL_VLAN_ID);
-        max_internal_vlan = smap_get_int(&sys->other_config,
-                     SYSTEM_OTHER_CONFIG_MAP_MAX_INTERNAL_VLAN,
-                     DFLT_SYSTEM_OTHER_CONFIG_MAP_MAX_INTERNAL_VLAN_ID);
-        internal_vlan_policy = smap_get(&sys->other_config,
-                     SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY);
+        smap_clone(&sys_other_config_smap, &sys->other_config);
+        min_internal_vlan =
+                smap_get_int(&sys_other_config_smap,
+                             SYSTEM_OTHER_CONFIG_MAP_MIN_INTERNAL_VLAN,
+                             DFLT_SYSTEM_OTHER_CONFIG_MAP_MIN_INTERNAL_VLAN_ID);
+        max_internal_vlan =
+                smap_get_int(&sys_other_config_smap,
+                             SYSTEM_OTHER_CONFIG_MAP_MAX_INTERNAL_VLAN,
+                             DFLT_SYSTEM_OTHER_CONFIG_MAP_MAX_INTERNAL_VLAN_ID);
+        internal_vlan_policy =
+                smap_get(&sys_other_config_smap,
+                         SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY);
         if (!internal_vlan_policy) {
             internal_vlan_policy =
                 SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_ASCENDING_DEFAULT;
@@ -1224,61 +1231,47 @@ portd_alloc_internal_vlan(void)
                   min_internal_vlan, max_internal_vlan,
                   internal_vlan_policy);
 
+        /* Check if internal VLAN policy is valid */
+        if ((strcmp(internal_vlan_policy,
+                    SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_ASCENDING_DEFAULT) != 0) &&
+            (strcmp(internal_vlan_policy,
+                    SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_DESCENDING) != 0)) {
+            smap_destroy(&sys_other_config_smap);
+            VLOG_ERR("Unknown internal vlan policy '%s'",
+                      internal_vlan_policy);
+            return -1;
+        }
     } else {
-        VLOG_ERR("Unable to acces system table in db.");
+        VLOG_ERR("Unable to access system table in db.");
         return -1;
     }
 
+    ascending = (strcmp(internal_vlan_policy,
+                        SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_ASCENDING_DEFAULT) == 0);
+
     OVSREC_BRIDGE_FOR_EACH (br_row, idl) {
         if (!strcmp(br_row->name, DEFAULT_BRIDGE_NAME)) {
-            svec_init(&vlans);
+            /* Set bitmap to identify available VLANs */
+            vlans_bmp = bitmap_allocate(VLAN_BITMAP_SIZE);
             for (i = 0; i < br_row->n_vlans; i++) {
                 struct ovsrec_vlan *vlan_row = br_row->vlans[i];
-                svec_add(&vlans, vlan_row->name);
+                bitmap_set1(vlans_bmp, vlan_row->id);
             }
-            svec_sort(&vlans);
-            if (!strcmp(internal_vlan_policy,
-                SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_ASCENDING_DEFAULT)) {
-                int j;
-                bool found = false;
-                for (j = min_internal_vlan; j <= max_internal_vlan; j++) {
-                    snprintf(vlan_name, 16, "VLAN%d", j);
-                    if (!svec_contains(&vlans, vlan_name)) {
-                        VLOG_DBG("Allocated internal vlan (%d)", j);
-                        found = true;
-                        ret = j;
-                        break;
-                    }
+            /* Loop through vlan bitmap and identify an available VLAN */
+            for (j = ascending ? min_internal_vlan : max_internal_vlan;
+                 ascending ? j <= max_internal_vlan : j >= min_internal_vlan;
+                 ascending ? j++ : j--) {
+                if (!bitmap_is_set(vlans_bmp,j)) {
+                    VLOG_DBG("Allocated internal vlan (%d)", j);
+                    vlan_allocated = j;
+                    break;
                 }
-                if (!found) {
-                    ret = -1;
-                }
-            } else if (!strcmp(internal_vlan_policy,
-                SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_DESCENDING)) {
-                int j;
-                bool found = false;
-                for (j = max_internal_vlan; j >= min_internal_vlan; j--) {
-                    snprintf(vlan_name, 16, "VLAN%d", j);
-                    if (!svec_contains(&vlans, vlan_name)) {
-                        VLOG_DBG("Allocated internal vlan (%d)", j);
-                        found = true;
-                        ret = j;
-                        break;
-                    }
-                }
-                if (!found) {
-                    ret = -1;
-                }
-            } else {
-                VLOG_ERR("Unknown internal vlan policy '%s'",
-                          internal_vlan_policy);
-                ret = -1;
             }
-            svec_destroy(&vlans);
-            break; /* do this only on bridge_normal */
+            free(vlans_bmp);
         }
     }
-    return ret;
+    smap_destroy(&sys_other_config_smap);
+    return vlan_allocated;
 }
 
 /* add new vlan row into db */
