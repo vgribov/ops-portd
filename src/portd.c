@@ -98,6 +98,8 @@ static void portd_netlink_socket_open(int *sock, bool is_init_sock);
 
 static void portd_init(const char *remote);
 static void portd_exit(void);
+static void portd_set_status_error(const struct ovsrec_port *port_row,
+                                   char *error);
 static void portd_set_hw_cfg(struct port *port,
                              const struct ovsrec_port *port_row);
 static void portd_interface_up_down(const char *interface_name,
@@ -632,7 +634,8 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_port_col_interfaces);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_tag);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_admin);
-
+    ovsdb_idl_add_column(idl, &ovsrec_port_col_status);
+    ovsdb_idl_omit_alert(idl, &ovsrec_port_col_status);
     /*
      * Adding the interface table so that we can listen to interface
      * "up"/"down" notifications. We need to add two columns to the
@@ -707,6 +710,23 @@ portd_exit(void)
 {
     close(nl_sock);
     ovsdb_idl_destroy(idl);
+}
+
+/* Functin to add status to port table ie up or no_internal_vlan */
+static void
+portd_set_status_error(const struct ovsrec_port *port_row, char *error)
+{
+    struct smap set_status_smap;
+    if(!port_row){
+        VLOG_ERR("Invalid call with port entry null");
+        return;
+    }
+    smap_init(&set_status_smap);
+    smap_clone(&set_status_smap, &port_row->status);
+    smap_replace(&set_status_smap, PORT_STATUS_MAP_ERROR, error);
+    ovsrec_port_set_status(port_row, &set_status_smap);
+    smap_destroy(&set_status_smap);
+    commit_txn = true;
 }
 
 /* Function to set hw_cfg in port row */
@@ -1278,6 +1298,7 @@ portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
     vid = portd_alloc_internal_vlan();
     if (vid == -1) {
         VLOG_ERR("Error allocating internal vlan for port '%s'", port_row->name);
+        portd_set_status_error(port_row, PORT_STATUS_MAP_ERROR_NO_INTERNAL_VLAN);
         return;
     }
 
