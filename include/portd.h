@@ -114,6 +114,12 @@ struct kernel_port {
     struct hmap ip6addr; /*List of IPv6 addresses */
 };
 
+struct rtareq {
+    struct nlmsghdr  n;
+    struct ifinfomsg i;
+    char buf[128];      /* must fit interface name length (IFNAMSIZ)*/
+};
+
 struct ovsrec_port* portd_port_db_lookup(const char *);
 /* Helper functions to identify intervlan interfaces */
 bool portd_interface_type_internal_check(const struct ovsrec_port *port,

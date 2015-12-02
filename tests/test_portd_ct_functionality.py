@@ -559,6 +559,119 @@ def portd_functionality_tc6(**kwargs):
             ipv6 address on interface %d after no-shutdown" % intf3
 
 
+    # Test Case 7:
+    # Test case checks if the interfaces MTU is set kernel after
+    # configuring through CLI.
+    # Also checks MTU remains unchanged when invalid MTU is configured.
+def portd_functionality_tc7(**kwargs):
+    switch = kwargs.get('switch', None)
+
+    # CLI command equivalent of the APIs/commands used below to configure
+    # switch
+    '''
+    switch(config)#interface 3
+    switch(config-if)#no shutdown
+    switch(config-if)#no routing
+    switch(config-if)#mtu 1300
+    switch(config-if)#exit
+    switch(config)#interface 3
+    switch(config-if)#no shutdown
+    switch(config-if)#no routing
+    switch(config-if)#mtu 2000
+    switch(config-if)#exit
+    '''
+
+    returnStructure = switch.VtyshShell(enter=True)
+    retCode = returnStructure.returnCode()
+    assert retCode == 0, "Unable to enter vtysh shell"
+    returnStructure = switch.ConfigVtyShell(enter=True)
+    retCode = returnStructure.returnCode()
+    assert retCode == 0, "Unable to enter config mode"
+    command = "interface 3"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to enter interface 3"
+    command = "no shut"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to execute no shut"
+    command = "no routing"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to execute no routing"
+    command = "mtu 1300"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to execute 'mtu 1300' for interface 3"
+    command = "exit"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to exit interface 3"
+    returnStructure = switch.ConfigVtyShell(enter=False)
+    retCode = returnStructure.returnCode()
+    assert retCode == 0, "Unable to exit config mode"
+    returnStructure = switch.VtyshShell(enter=False)
+    retCode = returnStructure.returnCode()
+    assert retCode == 0, "Unable to exit vtysh shell"
+
+    LogOutput('info',
+              "### Verifying interface 3 'MTU' value in the kernel ###")
+    command = "ip netns exec swns ifconfig 3"
+    returnStructure = switch.DeviceInteract(command=command)
+    bufferout = returnStructure.get('buffer')
+    out = bufferout.split()
+    indexval = out.index("BROADCAST")
+    assert '1300' in out[indexval + 1], "Cannot verify kernel mtu \
+                value on interface %d" % intf3
+
+    returnStructure = switch.VtyshShell(enter=True)
+    retCode = returnStructure.returnCode()
+    assert retCode == 0, "Unable to enter vtysh shell"
+    returnStructure = switch.ConfigVtyShell(enter=True)
+    retCode = returnStructure.returnCode()
+    assert retCode == 0, "Unable to enter config mode"
+    command = "interface 3"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to enter interface 3"
+    command = "no shut"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to execute no shut"
+    command = "no routing"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to execute no routing"
+    command = "mtu 2000"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to execute 'mtu 1300' for interface 3"
+    command = "exit"
+    returnStructure = switch.DeviceInteract(command=command)
+    retCode = returnStructure['returnCode']
+    assert retCode == 0, "Unable to exit interface 3"
+    returnStructure = switch.ConfigVtyShell(enter=False)
+    retCode = returnStructure.returnCode()
+    assert retCode == 0, "Unable to exit config mode"
+    returnStructure = switch.VtyshShell(enter=False)
+    retCode = returnStructure.returnCode()
+    assert retCode == 0, "Unable to exit vtysh shell"
+
+    LogOutput('info',
+              "### Verifying interface 3 with invalid 'MTU'"
+              " value in the kernel ###")
+    command = "ip netns exec swns ifconfig 3"
+    returnStructure = switch.DeviceInteract(command=command)
+    bufferout = returnStructure.get('buffer')
+    out = bufferout.split()
+    indexval = out.index("BROADCAST")
+    assert '1300' in out[indexval + 1], "Cannot verify kernel mtu \
+                value on interface %d" % intf3
+    LogOutput('info',
+              "### Verifying interface 3 'MTU' value in the "
+              "kernel - SUCCESS ###")
+
+
 @pytest.mark.timeout(500)
 class Test_portd_functionality:
 
@@ -595,3 +708,7 @@ class Test_portd_functionality:
     def test_portd_functionality_tc6(self):
         dut01Obj = self.topoObj.deviceObjGet(device="dut01")
         portd_functionality_tc6(switch=dut01Obj)
+
+    def test_portd_functionality_tc7(self):
+        dut01Obj = self.topoObj.deviceObjGet(device="dut01")
+        portd_functionality_tc7(switch=dut01Obj)

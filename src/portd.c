@@ -104,6 +104,8 @@ static void portd_set_hw_cfg(struct port *port,
                              const struct ovsrec_port *port_row);
 static void portd_interface_up_down(const char *interface_name,
                                     const char *status);
+static void portd_set_interface_mtu(const char *interface_name,
+                                    unsigned int mtu);
 static struct ovsrec_interface* portd_get_matching_interface_row(
         const struct ovsrec_port *portrow);
 static struct ovsrec_port* portd_get_port_row(
@@ -650,6 +652,7 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_name);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_admin_state);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_user_config);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_hw_intf_config);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_type);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_vlan);
@@ -773,6 +776,55 @@ portd_set_hw_cfg(struct port *port, const struct ovsrec_port *port_row)
     commit_txn = true;
 }
 
+/*
+ * Function: portd_set_interface_mtu
+ * Param:
+ *      interface_name: Name of the interface.
+ *      mtu : MTU configured for the interface.
+ * Return:
+ * Desc:
+ *      Set MTU value for the interface specified.
+ */
+static void
+portd_set_interface_mtu(const char *interface_name, unsigned int mtu)
+{
+    struct rtattr *rta;
+    struct rtareq req;
+
+    if (interface_name == NULL ||
+            strcmp(interface_name, PORTD_EMPTY_STRING) == 0) {
+        VLOG_ERR("Invalid interface-name as argument");
+        return;
+    }
+    memset(&req, 0, sizeof(req));
+
+    req.n.nlmsg_len     = NLMSG_SPACE(sizeof(struct ifinfomsg));
+    req.n.nlmsg_pid     = getpid();
+    req.n.nlmsg_type    = RTM_NEWLINK;
+    req.n.nlmsg_flags   = NLM_F_REQUEST;
+
+    req.i.ifi_family    = AF_UNSPEC;
+    req.i.ifi_index     = if_nametoindex(interface_name);
+
+    if (req.i.ifi_index == 0) {
+        VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
+        return;
+    }
+
+    req.i.ifi_change = 0xffffffff;
+    rta = (struct rtattr *)(((char *) &req) + NLMSG_ALIGN(req.n.nlmsg_len));
+    rta->rta_type = IFLA_MTU;
+    rta->rta_len = RTA_LENGTH(sizeof(unsigned int));
+    req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + RTA_LENGTH(sizeof(mtu));
+    memcpy(RTA_DATA(rta), &mtu, sizeof(mtu));
+
+    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to set mtu %d for interface %s", mtu,
+                 interface_name);
+        return;
+    }
+}
+
 /**
  * Function: portd_interface_up_down
  * Param:
@@ -787,11 +839,7 @@ portd_set_hw_cfg(struct port *port, const struct ovsrec_port *port_row)
 static void
 portd_interface_up_down(const char *interface_name, const char *status)
 {
-    struct {
-        struct nlmsghdr  n;
-        struct ifinfomsg i;
-        char buf[128];  /* must fit interface name length (IFNAMSIZ)*/
-    } req;
+    struct rtareq req;
 
     if (status == NULL || strcmp(status, PORTD_EMPTY_STRING) == 0) {
         VLOG_ERR("Invalid status argument");
@@ -954,7 +1002,8 @@ portd_port_admin_state_reconfigure(struct port *port,
 
 /**
  * This function processes the interface "up"/"down" notifications
- * that are received from OVSDB. In response to a change in interface
+ * & MTU notifications that are received from OVSDB.
+ * In response to a change in interface
  * admin state, this function does the following:
  * 1. Based on interface user_config:admin, bring up/down the kernel
  *    interface
@@ -968,6 +1017,9 @@ portd_port_admin_state_reconfigure(struct port *port,
  *    port.
  * 4. If port found, updates the hw_config key "enable" based on the user
  *            configuration to set the port admin state to up or down.
+ * In response to change in MTU value in hw_config_info,
+ * 1. Finds the port structure corresponding to the interface name and
+ *    updates the MTU value for that kernel interface.
  */
 static void
 portd_handle_interface_config_mods(void)
@@ -975,6 +1027,8 @@ portd_handle_interface_config_mods(void)
     const struct ovsrec_port *port_row = NULL;
     const struct ovsrec_interface *intf_row = NULL;
     char *cur_state = NULL;
+    char *hw_intf_config_mtu = NULL;
+
     /* default states of interface and port admin */
     bool intf_admin = false;
     bool port_admin = true;
@@ -1049,6 +1103,21 @@ portd_handle_interface_config_mods(void)
                        the port admin and the interface admin */
                     port->hw_cfg_enable = (intf_admin && port_admin);
                     portd_set_hw_cfg(port, port_row);
+                }
+            }
+
+            /*
+             * Check if the hw_intf_config column changed.
+             */
+            if (OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_interface_col_hw_intf_config,
+                                              idl_seqno))
+            {
+                hw_intf_config_mtu = (char *)smap_get(&intf_row->hw_intf_config,
+                                             INTERFACE_HW_INTF_CONFIG_MAP_MTU);
+
+                if (hw_intf_config_mtu != NULL) {
+                    portd_set_interface_mtu(intf_row->name,
+                                            atoi(hw_intf_config_mtu));
                 }
             }
 
