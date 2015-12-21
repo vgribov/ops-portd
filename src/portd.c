@@ -157,7 +157,12 @@ static void portd_unixctl_dump(struct unixctl_conn *conn,
                                void *aux OVS_UNUSED);
 static char * parse_options(int argc, char *argv[], char **unixctl_pathp);
 static void ops_portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
-                           const char *argv[] OVS_UNUSED, void *exiting_);
+        const char *argv[] OVS_UNUSED, void *exiting_);
+extern int
+portd_get_prefix(int family, char *ip_address, void *prefix,
+                 unsigned char *prefixlen);
+void
+portd_del_subinterface(const char *sub_interface_name);
 
 /*
  * Lookup port entry from DB
@@ -208,6 +213,74 @@ portd_interface_type_internal_check(const struct ovsrec_port *port,
                 __FUNCTION__, __LINE__, interface_name);
     return false;
 }
+
+/**
+ * Function: portd_interface_type_loopback_check
+ * Param:
+ *      port: port record whose interfaces are examined for "loopback" type.
+ *      interface_name: Name of interface to check "loopback" type.
+ * Return:
+ *      true  : Provided interface exists and is of type "loopback"
+ *      false : Provide interface either doesn't exist or not "loopback" type.
+ */
+bool
+portd_interface_type_loopback_check(const struct ovsrec_port *port,
+        const char *interface_name)
+{
+    struct ovsrec_interface *intf;
+    size_t i=0;
+
+    for (i=0; i<port->n_interfaces; ++i) {
+        intf = port->interfaces[i];
+        if (strcmp(port->name, intf->name)==0 &&
+                strcmp(intf->type, OVSREC_INTERFACE_TYPE_LOOPBACK)==0) {
+
+            VLOG_DBG("[%s:%d]: Interface %s is of type \"loopback\" found. ",
+                    __FUNCTION__, __LINE__, interface_name);
+            return true;
+        }
+    }
+
+    VLOG_DBG("[%s:%d]: Interface %s is NOT of type \"loopback\". ",
+            __FUNCTION__, __LINE__, interface_name);
+    return false;
+}
+
+
+/**
+ * Function: portd_interface_type_subinterface_check
+ * Param:
+ *      port: port record whose interfaces are examined for "subinterface" type
+ *      interface_name: Name of interface to check "subinterface" type
+ * Return:
+ *      true  : Provided interface exists and is of type "subinterface"
+ *      false : Provide interface either doesn't exist or not "subinterface".
+ */
+bool
+portd_interface_type_subinterface_check(const struct ovsrec_port *port,
+        const char *interface_name)
+{
+    struct ovsrec_interface *intf;
+    size_t i=0;
+
+    for (i=0; i<port->n_interfaces; ++i) {
+        intf = port->interfaces[i];
+        if (strcmp(port->name, intf->name)==0 &&
+                strcmp(intf->type, OVSREC_INTERFACE_TYPE_VLANSUBINT)==0) {
+
+            VLOG_DBG("[%s:%d]: Interface %s is of type \"vlansubintf\" found.",
+                    __FUNCTION__, __LINE__, interface_name);
+            return true;
+        }
+    }
+
+    VLOG_DBG("[%s:%d]: Interface %s is NOT of type \"vlansubintf\". ",
+            __FUNCTION__, __LINE__, interface_name);
+    return false;
+}
+
+
+
 
 /**
  * Function: portd_port_in_bridge_check
@@ -654,6 +727,7 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_user_config);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_hw_intf_config);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_type);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_subintf_parent);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_vlan);
     ovsdb_idl_add_column(idl, &ovsrec_vlan_col_name);
@@ -883,7 +957,299 @@ portd_interface_up_down(const char *interface_name, const char *status)
     }
 }
 
-/* Function : portd_get_matching_interface_row()
+static int
+add_link_attr(struct nlmsghdr *n, int nlmsg_maxlen,
+        int attr_type, const void *payload, int payload_len)
+{
+    int len = RTA_LENGTH(payload_len);
+    struct rtattr *rta;
+
+    if (NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len) > nlmsg_maxlen) {
+        VLOG_ERR("message exceeded bound of %d. Failed to add attribute: %d",
+                nlmsg_maxlen, attr_type);
+        return -1;
+    }
+
+    rta = NLMSG_TAIL(n);
+    rta->rta_type = attr_type;
+    rta->rta_len = len;
+    memcpy(RTA_DATA(rta), payload, payload_len);
+    n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len);
+    return 0;
+}
+
+
+bool
+portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
+{
+    int ifindex;
+
+    struct {
+        struct nlmsghdr  n;
+        struct ifinfomsg i;
+        char             buf[128];  /* must fit interface name length (IFNAMSIZ)
+                                       and attribute hdrs. */
+    } req;
+    unsigned short vlan_tag = 0;
+    const struct ovsrec_interface *intf_row = NULL,  *parent_intf_row = NULL;
+    memset(&req, 0, sizeof(req));
+
+    intf_row = portd_get_matching_interface_row(port_row);
+    if (NULL == intf_row) {
+        VLOG_ERR("Failed to get interface row %s", port_row->name );
+        return false;
+    }
+
+    bool intf_status = false;
+    if(intf_row->n_subintf_parent)
+    {
+        parent_intf_row = intf_row->value_subintf_parent[0];
+        vlan_tag = (unsigned short)intf_row->key_subintf_parent[0];
+    }
+
+    if (parent_intf_row && (strcmp(parent_intf_row->admin_state,
+            OVSREC_INTERFACE_USER_CONFIG_ADMIN_UP) == 0))
+    {
+        intf_status = true;
+    }else {
+      return false;
+    }
+    const char *cur_state =NULL;
+    cur_state = smap_get(&intf_row->user_config,
+                INTERFACE_USER_CONFIG_MAP_ADMIN);
+    if ((NULL != cur_state)
+                && (strcmp(cur_state,
+                        OVSREC_INTERFACE_USER_CONFIG_ADMIN_UP) == 0))
+    {
+        if(intf_status)
+        {
+            VLOG_ERR("Parent interface is down for subinterface %s",
+                    port_row->name);
+        }
+        intf_status = false;
+    }
+
+    if(0 == vlan_tag) intf_status = false;
+    portd_del_subinterface(port_row->name);
+    if (0 != vlan_tag) {
+    {
+        VLOG_INFO("Creating subinterface %s", port_row->name);
+
+        req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
+        req.n.nlmsg_pid     = getpid();
+        req.n.nlmsg_type    = RTM_NEWLINK;
+        req.n.nlmsg_flags   = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
+
+        req.i.ifi_family    = AF_UNSPEC;
+        ifindex             = if_nametoindex(parent_intf_row->name);
+        if (ifindex == 0) {
+            VLOG_ERR("Unable to get ifindex for interface: %s",
+                   parent_intf_row->name);
+            return false;
+        }
+
+        struct rtattr *linkinfo = NLMSG_TAIL(&req.n);
+        add_link_attr(&req.n, sizeof(req), IFLA_LINKINFO, NULL, 0);
+        add_link_attr(&req.n, sizeof(req), IFLA_INFO_KIND,
+                                         INTERFACE_TYPE_VLAN, 4);
+
+        struct rtattr * data = NLMSG_TAIL(&req.n);
+        add_link_attr(&req.n, sizeof(req), IFLA_INFO_DATA, NULL, 0);
+        add_link_attr(&req.n, sizeof(req), IFLA_VLAN_ID, &vlan_tag, 2);
+
+        /* Adjust rta_len for attributes */
+        data->rta_len = (void *)NLMSG_TAIL(&req.n) - (void *)data;
+        linkinfo->rta_len = (void *)NLMSG_TAIL(&req.n) - (void *)linkinfo;
+
+        add_link_attr(&req.n, sizeof(req), IFLA_LINK, &ifindex, 4);
+        add_link_attr(&req.n, sizeof(req), IFLA_IFNAME, port_row->name,
+                strlen(port_row->name)+1);
+
+        if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+            VLOG_ERR("Netlink failed to create sub interface: %s (%s)",
+                    port_row->name, strerror(errno));
+            return false;
+        }
+    }
+    }
+    portd_interface_up_down(port_row->name, intf_status ? "up" : "down");
+
+    return true;
+}
+
+/* Maskbit. */
+static const u_char maskbit[] = {0x00, 0x80, 0xc0, 0xe0, 0xf0,
+                                 0xf8, 0xfc, 0xfe, 0xff};
+
+/* Number of bits in prefix type. */
+#ifndef PNBBY
+#define PNBBY 8
+#endif /* PNBBY */
+
+#define MASKBIT(offset)  ((0xff << (PNBBY - (offset))) & 0xff)
+
+void
+masklen2ip (int masklen,char* netmask)
+{
+    u_int i=0,j=0,subnet_bits = 0;
+    u_char address[7];
+    char *data;
+
+    while(i < masklen)
+        subnet_bits |= (1 << i++);
+
+    data = (char *)&subnet_bits;
+    j=4; i=0;
+    while (j--)
+      address[i++] = *data++;
+
+    sprintf(netmask,"%d.%d.%d.%d",
+            address[0],address[1],address[2],address[3]);
+}
+
+#define LOOPBACK_NAME_STR_LEN 256
+
+#define ifreq_offsetof(x)  offsetof(struct ifreq, x)
+
+
+bool
+portd_delete_loopback_interface(const char *port_name)
+{
+    char loopback_name[LOOPBACK_NAME_STR_LEN] = {0};
+    sprintf(loopback_name, "lo:%s", port_name+2);
+    struct ifreq ifr;
+    int sockfd;
+
+    /* Create a channel to the NET kernel. */
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    /* get interface name */
+    strncpy(ifr.ifr_name, loopback_name, sizeof(loopback_name)/sizeof(char));
+
+    ifr.ifr_flags = IFF_LOOPBACK;
+    if(-1 == ioctl(sockfd, SIOCSIFFLAGS, &ifr))
+    {
+        VLOG_ERR("Failed to delete %s", loopback_name);
+    }
+    else
+    {
+        VLOG_INFO("Deleted loopback interface %s", loopback_name );
+    }
+    close(sockfd);
+    return true;
+}
+
+
+bool
+portd_reconfigure_loopback_interface(const struct ovsrec_port *port_row)
+{
+    char loopback_name[LOOPBACK_NAME_STR_LEN] = {0};
+    sprintf(loopback_name, "lo:%s", port_row->name+2);
+
+    struct ifreq ifr;
+    struct sockaddr_in sai;
+    int sockfd;
+
+    portd_delete_loopback_interface(port_row->name);
+
+    /* Create a channel to the NET kernel. */
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    /* get interface name */
+    strncpy(ifr.ifr_name, loopback_name, sizeof(loopback_name)/sizeof(char));
+
+    if (port_row->ip4_address)
+    {
+       char *ip_address = xstrdup(port_row->ip4_address);
+       int prefixlen = 0;
+       char netmask[17] = {0};
+       char *p = strchr(ip_address,'/');
+       if(p)
+       {
+           *p++ = '\0';
+           prefixlen = atoi(p);
+       }
+       masklen2ip(prefixlen, netmask);
+
+       /* Update values using ioctls */
+       memset(&sai, 0, sizeof(struct sockaddr));
+       sai.sin_family = AF_INET;
+       sai.sin_port = 0;
+
+       sai.sin_addr.s_addr = inet_addr(ip_address);
+
+       p = (char *) &sai;
+       memcpy( (((char *)&ifr + ifreq_offsetof(ifr_addr) )),
+               p, sizeof(struct sockaddr));
+
+       if(-1 == ioctl(sockfd, SIOCSIFADDR, &ifr))
+       {
+           VLOG_ERR("Failed to update IP address for %s", loopback_name);
+       }
+
+       sai.sin_family = AF_INET;
+       sai.sin_port = 0;
+
+       sai.sin_addr.s_addr = inet_addr(netmask);
+
+       p = (char *) &sai;
+       memcpy( (((char *)&ifr + ifreq_offsetof(ifr_addr))),
+               p, sizeof(struct sockaddr));
+
+       if(-1 == ioctl(sockfd, SIOCSIFNETMASK, &ifr))
+       {
+           VLOG_ERR("Failed to update netmask for %s", loopback_name);
+       }
+    }
+
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING | IFF_LOOPBACK;
+
+    if(-1 == ioctl(sockfd, SIOCSIFFLAGS, &ifr))
+    {
+        VLOG_ERR("Failed to update %s", loopback_name);
+    }
+    close(sockfd);
+    return true;
+}
+
+
+void
+portd_del_subinterface(const char *sub_interface_name)
+{
+    struct {
+        struct nlmsghdr  n;
+        struct ifinfomsg i;
+        char             buf[128];
+    } req;
+
+    memset(&req, 0, sizeof(req));
+
+    req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
+    req.n.nlmsg_pid     = getpid();
+    req.n.nlmsg_type    = RTM_DELLINK;
+    req.n.nlmsg_flags   = NLM_F_REQUEST;
+
+    req.i.ifi_family    = AF_UNSPEC;
+    req.i.ifi_index     = if_nametoindex(sub_interface_name);
+
+    if (req.i.ifi_index == 0) {
+        VLOG_ERR("Unable to get ifindex for subinterface: %s",
+               sub_interface_name);
+        return;
+    }
+
+    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to delete subinterface: %s (%s)",
+                sub_interface_name, strerror(errno));
+        return;
+    }
+
+    VLOG_INFO("Deleted subinterface %s", sub_interface_name);
+    return;
+}
+
+
+/* Function : fffffffet_matching_interface_row()
  * Desc     : search the ovsdb and get the matching
  *            interface row based on the port row name.
  * Param    : seach based on row name
@@ -1432,6 +1798,14 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                 portd_interface_up_down(port_row->name, "up");
 
                 port->type = xstrdup(OVSREC_INTERFACE_TYPE_INTERNAL);
+            } else if (portd_interface_type_subinterface_check(port_row,
+                    port_row->name)) {
+                portd_reconfigure_subinterface(port_row);
+                port->type = xstrdup(OVSREC_INTERFACE_TYPE_VLANSUBINT);
+            } else if (portd_interface_type_loopback_check(port_row,
+                    port_row->name)) {
+                portd_reconfigure_loopback_interface(port_row);
+                port->type = xstrdup(OVSREC_INTERFACE_TYPE_LOOPBACK);
             } else {
                 /* Only assign internal VLAN if not already present. */
                 smap_clone(&hw_cfg_smap, &port_row->hw_config);
@@ -1474,17 +1848,76 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
             VLOG_DBG("Port has IP: %s vrf %s\n", port_row->ip4_address,
                       vrf->name);
 
-        } else if ((port) && OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) {
-            portd_reconfig_ipaddr(port, port_row);
-            portd_port_admin_state_reconfigure(port, port_row);
-            /* Port table row modified */
-            VLOG_DBG("Port modified IP: %s vrf %s\n", port_row->ip4_address,
-                     vrf->name);
-        } else {
-            VLOG_DBG("[%s:%d]: port %s exists, but no change in seqno",
-                    __FUNCTION__, __LINE__, port_row->name);
+        } else if (port) {
+            if (OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) {
+                if((NULL != port->type) &&
+                        (strcmp(port->type,
+                                OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
+                    portd_reconfigure_loopback_interface(port_row);
+                    continue;
+                }
+                portd_reconfig_ipaddr(port, port_row);
+                portd_port_admin_state_reconfigure(port, port_row);
+                /* Port table row modified */
+                VLOG_DBG("Port modified IP: %s vrf %s\n", port_row->ip4_address,
+                        vrf->name);
+/*            } else if ((NULL != port->type) &&
+                    (strcmp(port->type,
+                            OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0) ){
+                portd_reconfigure_subinterface(port_row); */
+            } else {
+                VLOG_DBG("[%s:%d]: port %s exists, but no change in seqno",
+                        __FUNCTION__, __LINE__, port_row->name);
+            }
         }
     }
+
+    SHASH_FOR_EACH (port_node, wanted_ports) {
+        struct ovsrec_port *port_row = port_node->data;
+        struct port *port = portd_port_lookup(vrf, port_row->name);
+        if (port)
+        {
+            if((NULL != port->type) &&
+                    (strcmp(port->type,
+                            OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0)) {
+                char str[512] = {0};
+                portd_reconfigure_subinterface(port_row);
+                if ( port_row->ip4_address != NULL )
+                {
+                    nl_add_ip_address(RTM_NEWADDR, port_row->name, port_row->ip4_address,
+                    AF_INET, false);
+                }
+                snprintf(str, 512, "/sbin/ip netns exec swns "
+                            "/sbin/ip -6 address add %s dev %s",
+                            port_row->ip6_address, port_row->name);
+                if (system(str) != 0)
+                {
+                    VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
+                                str, strerror(errno));
+                }
+            }
+            if((NULL != port->type) &&
+                    (strcmp(port->type,
+                            OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
+                char str[512] = {0};
+                if ( port_row->ip4_address != NULL )
+                {
+                    nl_add_ip_address(RTM_NEWADDR, port_row->name, port_row->ip4_address,
+                    AF_INET, false);
+                }
+                snprintf(str, 512, "/sbin/ip netns exec swns "
+                            "/sbin/ip -6 address add %s dev %s",
+                            port_row->ip6_address, port_row->name);
+                if (system(str) != 0)
+                {
+                    VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
+                                str, strerror(errno));
+                }
+            }
+        }
+    }
+
+    return;
 }
 
 /* collect the ports from the current config in db */
@@ -1554,6 +1987,14 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
             if (port->type &&
                 (strcmp(port->type, OVSREC_INTERFACE_TYPE_INTERNAL) == 0)) {
                 portd_del_vlan_interface(port->name);
+            }
+            else if(port->type &&
+                    (strcmp(port->type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0)) {
+                portd_del_subinterface(port->name);
+            }
+            else if(port->type &&
+                    (strcmp(port->type, OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
+                     portd_delete_loopback_interface(port->name);
             }
 
             /* Port not present in the wanted_ports list. Destroy */

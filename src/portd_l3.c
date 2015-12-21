@@ -51,7 +51,7 @@ static bool is_route_matched(const struct ovsrec_route *row_route,
                              char *prefix_str, char *port_name);
 static int portd_del_connected_route(char *address, char *port_name,
                                      bool is_v4);
-static int portd_get_prefix(int family, char *ip_address, void *prefix,
+int portd_get_prefix(int family, char *ip_address, void *prefix,
                             unsigned char *prefixlen);
 static void portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
                              int family, bool secondary);
@@ -900,7 +900,7 @@ portd_del_connected_route(char *address, char *port_name, bool is_v4)
 /*********** End Connected routes handling **************/
 
 /* return ipv4/ipv6 prefix and prefix length */
-static int
+int
 portd_get_prefix(int family, char *ip_address, void *prefix,
                  unsigned char *prefixlen)
 {
