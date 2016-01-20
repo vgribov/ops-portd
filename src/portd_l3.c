@@ -668,6 +668,30 @@ apply_mask_ipv4(struct prefix_ipv4 *p)
     p->prefix.s_addr &= mask.s_addr;
 }
 
+#ifdef VRF_ENABLE
+/*
+ * Given a port name get the corresponding vrf row
+ */
+const struct ovsrec_vrf* get_vrf_row_for_port(const char *port_name)
+{
+  int iter, count;
+  const struct ovsrec_vrf *row_vrf = NULL;
+
+  OVSREC_VRF_FOR_EACH (row_vrf, idl)
+    {
+      count = row_vrf->n_ports;
+      for (iter = 0; iter < count; iter++)
+        {
+          if (0 == strncmp(port_name, row_vrf->ports[iter]->name,
+                                                  PORT_NAME_MAX_LEN))
+            return row_vrf;
+        }
+
+    }
+  return row_vrf;
+}
+#endif
+
 /*
  * Add a directly connected route to the DB. The NH is the port which
  * will be the egress port for the subnet
@@ -690,8 +714,13 @@ portd_add_connected_route(char* ip_address, struct ovsrec_port *ovs_port,
      * When we have support for multiple VRF, then fetch the
      * correct VRF for the port
      */
+#ifdef VRF_ENABLE
+    if (ovs_port)
+      row_vrf = get_vrf_row_for_port(ovs_port->name);
+#else
     row_vrf = ovsrec_vrf_first(idl);
-    if (!row_vrf) {
+#endif
+     if (!row_vrf) {
         VLOG_ERR("No vrf information yet.");
         return -1;
     }
@@ -959,7 +988,6 @@ portd_set_ipaddr(int cmd, const char *port_name, char *ip_address,
                  int family, bool secondary)
 {
     struct ovsrec_port* port;
-
     nl_add_ip_address(cmd, port_name, ip_address, family, secondary);
 
     /*

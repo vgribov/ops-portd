@@ -52,6 +52,8 @@
 
 #define CONNECTED_ROUTE_DISTANCE    0
 
+#define PORT_NAME_MAX_LEN 32
+
 #define NLMSG_TAIL(nmsg) \
         ((struct rtattr *) (((void *) (nmsg)) + \
         NLMSG_ALIGN((nmsg)->nlmsg_len)))
