@@ -567,19 +567,30 @@ def portd_functionality_tc7(**kwargs):
     switch = kwargs.get('switch', None)
 
     # CLI command equivalent of the APIs/commands used below to configure
-    # switch
+    # switch assuming max_transmission_unit for VSI is 1500.
     '''
     switch(config)#interface 3
     switch(config-if)#no shutdown
     switch(config-if)#no routing
-    switch(config-if)#mtu 1300
+    switch(config-if)#mtu 1400
     switch(config-if)#exit
     switch(config)#interface 3
     switch(config-if)#no shutdown
     switch(config-if)#no routing
-    switch(config-if)#mtu 2000
+    switch(config-if)#mtu 1600
     switch(config-if)#exit
     '''
+
+    LogOutput(
+        'info',
+        "\n\n######## Assigning MTU values to kernel interfaces ########")
+
+    command = "ovs-vsctl get subsystem base other_info:max_transmission_unit"
+    returnStructure = switch.DeviceInteract(command=command)
+    bufferout = returnStructure.get('buffer')
+    mtu_max = int(bufferout.split('\"')[1])
+    mtu_valid = mtu_max - 100
+    mtu_invalid = mtu_max + 100
 
     returnStructure = switch.VtyshShell(enter=True)
     retCode = returnStructure.returnCode()
@@ -599,10 +610,11 @@ def portd_functionality_tc7(**kwargs):
     returnStructure = switch.DeviceInteract(command=command)
     retCode = returnStructure['returnCode']
     assert retCode == 0, "Unable to execute no routing"
-    command = "mtu 1300"
+    command = "mtu " + str(mtu_valid)
     returnStructure = switch.DeviceInteract(command=command)
     retCode = returnStructure['returnCode']
-    assert retCode == 0, "Unable to execute 'mtu 1300' for interface 3"
+    assert retCode == 0, "Unable to execute 'mtu " + str(mtu_valid) + \
+        "' for interface 3"
     command = "exit"
     returnStructure = switch.DeviceInteract(command=command)
     retCode = returnStructure['returnCode']
@@ -618,10 +630,9 @@ def portd_functionality_tc7(**kwargs):
               "### Verifying interface 3 'MTU' value in the kernel ###")
     command = "ip netns exec swns ifconfig 3"
     returnStructure = switch.DeviceInteract(command=command)
-    bufferout = returnStructure.get('buffer')
-    out = bufferout.split()
-    indexval = out.index("BROADCAST")
-    assert '1300' in out[indexval + 1], "Cannot verify kernel mtu \
+    out = returnStructure.get('buffer')
+    mtu = int(re.search('\d+', re.search('MTU:\d+', out).group()).group())
+    assert (mtu == mtu_valid), "Cannot verify kernel mtu \
                 value on interface %d" % intf3
 
     returnStructure = switch.VtyshShell(enter=True)
@@ -642,10 +653,11 @@ def portd_functionality_tc7(**kwargs):
     returnStructure = switch.DeviceInteract(command=command)
     retCode = returnStructure['returnCode']
     assert retCode == 0, "Unable to execute no routing"
-    command = "mtu 2000"
+    command = "mtu " + str(mtu_invalid)
     returnStructure = switch.DeviceInteract(command=command)
     retCode = returnStructure['returnCode']
-    assert retCode == 0, "Unable to execute 'mtu 1300' for interface 3"
+    assert retCode == 0, "Unable to execute 'mtu " + str(mtu_invalid) + \
+        "' for interface 3"
     command = "exit"
     returnStructure = switch.DeviceInteract(command=command)
     retCode = returnStructure['returnCode']
@@ -662,10 +674,9 @@ def portd_functionality_tc7(**kwargs):
               " value in the kernel ###")
     command = "ip netns exec swns ifconfig 3"
     returnStructure = switch.DeviceInteract(command=command)
-    bufferout = returnStructure.get('buffer')
-    out = bufferout.split()
-    indexval = out.index("BROADCAST")
-    assert '1300' in out[indexval + 1], "Cannot verify kernel mtu \
+    out = returnStructure.get('buffer')
+    mtu = int(re.search('\d+', re.search('MTU:\d+', out).group()).group())
+    assert (mtu == mtu_valid), "Cannot verify kernel mtu \
                 value on interface %d" % intf3
     LogOutput('info',
               "### Verifying interface 3 'MTU' value in the "
