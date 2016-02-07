@@ -136,6 +136,32 @@ def portd(**kwargs):
     assert "ifconfig: error: interface `4.7' does not exist" in retCode, \
     "Failed!! still link Up in L2 parent Interface"
 
+# subinterface will down when parent will down
+    retStruct = InterfaceEnable(deviceObj=device1, enable=True,
+                                interface="7")
+    retStruct = InterfaceIpConfig(deviceObj=device1,
+                                  interface="7",
+                                  addr="152.20.1.4", mask=24, config=True)
+    retStruct = InterfaceEnable(deviceObj=device1, enable=True,
+                                interface="7.2")
+    retStruct = InterfaceIpConfig(deviceObj=device1,
+                                  interface="7.2",
+                                  addr="172.168.1.4", mask=24, config=True)
+    retStruct = Dot1qEncapsulation(deviceObj=device1, subInterface="7.2",
+                                   dot1q=True, vlan=10)
+
+    result = "ip netns exec swns ifconfig 7.2"
+    devIntReturn = device1.DeviceInteract(command=result)
+    retCode = devIntReturn.get('buffer')
+    assert "UP"in retCode, \
+           "Failed to retrieve ovs-vsctl command"
+    retStruct = InterfaceEnable(deviceObj=device1, enable=False,
+                                interface="7")
+    devIntReturn = device1.DeviceInteract(command=result)
+    retCode = devIntReturn.get('buffer')
+    assert "UP" not in retCode, \
+           "Failed to retrieve ovs-vsctl command"
+
 # Deleting sub interface
     devIntReturn = device1.DeviceInteract(command="vtysh")
     devIntReturn = device1.DeviceInteract(command="conf t")
