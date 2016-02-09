@@ -30,6 +30,8 @@
 
 #define PORTD_DISABLE_ROUTING 0
 #define PORTD_ENABLE_ROUTING 1
+#define PORTD_DISABLE_PROXY_ARP 0
+#define PORTD_ENABLE_PROXY_ARP 1
 #define PORTD_POLL_INTERVAL 5
 #define PORTD_IPV4_MAX_LEN 32
 #define PORTD_IPV6_MAX_LEN 128
@@ -71,6 +73,7 @@ struct port {
 
     int internal_vid;
     bool hw_cfg_enable;
+    bool proxy_arp_enabled;        /* Proxy ARP enabled/disabled */
     char *ip4_address;             /* Primary IPv4 address */
     char *ip6_address;             /* Primary IPv6 address */
     struct hmap secondary_ip4addr; /* List of secondary IPv4 addresses */
@@ -147,5 +150,8 @@ void portd_add_vlan_interface(const char *parent_intf_name,
                               const char *vlan_intf_name,
                               const unsigned short vlan_tag);
 void portd_del_vlan_interface(const char *vlan_intf_name);
+
+/* Proxy ARP function */
+void portd_config_proxy_arp(struct port *port, char *str, int enable);
 
 #endif /* PORTD_H_ */

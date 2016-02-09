@@ -84,6 +84,29 @@ static void portd_populate_db_ip_addr(struct shash *db_port_list,
 static void portd_add_port_to_cache(struct port *port);
 
 
+/* write to /proc entries to enable/disable proxy ARP on the port */
+void
+portd_config_proxy_arp(struct port *port, char *str, int enable)
+{
+    char proxy_arp_str[100] = {0};
+
+    snprintf(proxy_arp_str, sizeof(proxy_arp_str),
+            "sysctl net.ipv4.conf.%s.proxy_arp=%d", str,enable);
+
+    if (system(proxy_arp_str) != 0) {
+        VLOG_DBG("Failed to modify the proxy ARP state via sysctl");
+        return;
+    }
+
+    if(enable) {
+        port->proxy_arp_enabled = true;
+    } else {
+        port->proxy_arp_enabled = false;
+    }
+    VLOG_DBG("%s Proxy ARP on interface %s",
+             (enable == 1 ? "Enabled" : "Disabled"), str);
+}
+
 /* write to /proc entries to enable/disable Linux ip forwarding(routing) */
 void
 portd_config_iprouting(int enable)
@@ -94,7 +117,6 @@ portd_config_iprouting(int enable)
     const char *ipv6_path = "/proc/sys/net/ipv6/conf/all/forwarding";
 
     nbytes = sprintf(buf, "%d", enable);
-
     if ((fd = open(ipv4_path, O_WRONLY)) == -1) {
         VLOG_ERR("Unable to open %s (%s)", ipv4_path, strerror(errno));
         return;

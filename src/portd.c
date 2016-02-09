@@ -778,6 +778,7 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_port_col_admin);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_status);
     ovsdb_idl_omit_alert(idl, &ovsrec_port_col_status);
+    ovsdb_idl_add_column(idl, &ovsrec_port_col_other_config);
     /*
      * Adding the interface table so that we can listen to interface
      * "up"/"down" notifications. We need to add two columns to the
@@ -1959,6 +1960,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
     bool intf_admin = false;
     struct smap hw_cfg_smap;
     char *cur_state = NULL;
+    char *proxy_arp_state = NULL;
 
     SHASH_FOR_EACH (port_node, wanted_ports) {
         struct ovsrec_port *port_row = port_node->data;
@@ -2047,10 +2049,31 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                 /* Port table row modified */
                 VLOG_DBG("Port modified IP: %s vrf %s\n", port_row->ip4_address,
                         vrf->name);
-            } else {
-                VLOG_DBG("[%s:%d]: port %s exists, but no change in seqno",
-                        __FUNCTION__, __LINE__, port_row->name);
+
+                if (OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_port_col_other_config,
+                                                  idl_seqno)) {
+                    /* Check if proxy arp state has changed */
+                    proxy_arp_state = (char *)smap_get(
+                                      &port_row->other_config,
+                                      PORT_OTHER_CONFIG_MAP_PROXY_ARP_ENABLED);
+
+                    if (proxy_arp_state && (VTYSH_STR_EQ(proxy_arp_state,
+                        PORT_OTHER_CONFIG_MAP_PROXY_ARP_ENABLED_TRUE))) {
+                        if (!port->proxy_arp_enabled) {
+                            portd_config_proxy_arp(port, port_row->name,
+                                                   PORTD_ENABLE_PROXY_ARP);
+                        }
+                    } else {
+                        if (port->proxy_arp_enabled) {
+                            portd_config_proxy_arp(port, port_row->name,
+                                                   PORTD_DISABLE_PROXY_ARP);
+                        }
+                    }
+                }
             }
+        } else {
+            VLOG_DBG("[%s:%d]: port %s exists, but no change in seqno",
+                       __FUNCTION__, __LINE__, port_row->name);
         }
     }
 
@@ -2179,6 +2202,11 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
                      lpbk_count--;
                      log_event("LOOPBACK_DELETE", EV_KV("interface",
                                "%s", port->name));
+            }
+
+            if (port->proxy_arp_enabled) {
+                portd_config_proxy_arp(port, port->name,
+                                       PORTD_DISABLE_PROXY_ARP);
             }
 
             /* Port not present in the wanted_ports list. Destroy */
