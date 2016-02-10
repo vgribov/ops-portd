@@ -1906,8 +1906,8 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                     AF_INET, false);
                 }
                 snprintf(str, 512, "/sbin/ip netns exec swns "
-                            "/sbin/ip -6 address add %s dev %s",
-                            port_row->ip6_address, port_row->name);
+                            "/sbin/ip -6 address add %s dev lo:%s",
+                            port_row->ip6_address, port_row->name+2);
                 if (system(str) != 0)
                 {
                     VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
