@@ -55,10 +55,14 @@
 #include "vlan-bitmap.h"
 
 #include "portd.h"
+#include "linux_bond.h"
 
 VLOG_DEFINE_THIS_MODULE(ops_portd);
 
 COVERAGE_DEFINE(portd_reconfigure);
+
+#define LAG_NAME_SUFFIX_LENGTH    3
+#define LAG_NAME_SUFFIX           "lag"
 
 int nl_sock; /* Netlink socket */
 int init_sock; /* This sock will only be used during init */
@@ -80,6 +84,32 @@ static bool portd_config_on_init = true;
 
 /* All vrfs, indexed by name. */
 struct hmap all_vrfs = HMAP_INITIALIZER(&all_vrfs);
+
+/**
+ * A hash map of daemon's internal data for all the interfaces maintained by
+ * portd.
+ */
+static struct shash all_interfaces = SHASH_INITIALIZER(&all_interfaces);
+
+/**
+ * A hash map of daemon's internal data for all the ports maintained by portd.
+ */
+static struct shash all_ports = SHASH_INITIALIZER(&all_ports);
+
+/* Portd's internal data structure to store per lag data. */
+struct port_lag_data {
+    char                      *name;
+    struct shash              eligible_member_ifs;
+    struct shash              bonding_ifs;
+    const struct ovsrec_port  *cfg;
+};
+
+/* Portd's internal data structure to store per interface data. */
+struct iface_data {
+    char                            *name;
+    struct port_lag_data            *port_datap;
+    const struct ovsrec_interface   *cfg;
+};
 
 /* Utility functions */
 static struct vrf* portd_vrf_lookup(const char *name);
@@ -163,6 +193,17 @@ portd_get_prefix(int family, char *ip_address, void *prefix,
                  unsigned char *prefixlen);
 void
 portd_del_subinterface(const char *sub_interface_name);
+
+/* Lag bonding related functions */
+static void portd_del_old_interface(struct shash_node *sh_node);
+static void portd_add_new_interface(const struct ovsrec_interface *ifrow);
+static void update_interface_cache(void);
+static void portd_del_old_port(struct shash_node *sh_node);
+static void portd_add_new_port(const struct ovsrec_port *port_row);
+static void portd_update_bond_slaves(struct port_lag_data *portp);
+static void portd_handle_port_config(const struct ovsrec_port *row,
+                                     struct port_lag_data *portp);
+static void portd_update_interface_lag_eligibility(struct iface_data *idp);
 
 /*
  * Lookup port entry from DB
@@ -728,6 +769,7 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_hw_intf_config);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_type);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_subintf_parent);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_hw_bond_config);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_vlan);
     ovsdb_idl_add_column(idl, &ovsrec_vlan_col_name);
@@ -1365,6 +1407,111 @@ portd_port_admin_state_reconfigure(struct port *port,
 }
 
 /**
+ * Deletes an old interface from the daemon's internal data structures
+ */
+static void
+portd_del_old_interface(struct shash_node *sh_node)
+{
+    if (sh_node) {
+        struct iface_data *idp = sh_node->data;
+        free(idp->name);
+        free(idp);
+        shash_delete(&all_interfaces, sh_node);
+    }
+} /* portd_del_old_interface */
+
+/**
+ * Adds a new interface to daemon's internal data structures.
+ *
+ * Allocates a new iface_data entry. Parses the ifrow and
+ * copies data into new iface_data entry.
+ * Adds the new iface_data entry into all_interfaces shash map.
+ * @param ifrow pointer to interface configuration row in IDL cache.
+ */
+static void
+portd_add_new_interface(const struct ovsrec_interface *ifrow)
+{
+    struct iface_data *idp = NULL;
+
+    VLOG_DBG("Interface %s being added!", ifrow->name);
+
+    /* Allocate structure to save state information for this interface. */
+    idp = xzalloc(sizeof *idp);
+
+    if (!shash_add_once(&all_interfaces, ifrow->name, idp)) {
+        VLOG_WARN("Interface %s specified twice", ifrow->name);
+        free(idp);
+    } else {
+       /* Save the interface name. */
+       idp->name = xstrdup(ifrow->name);
+
+       /* Save the reference to IDL row. */
+       idp->cfg = ifrow;
+
+       VLOG_DBG("Created local data for interface %s", ifrow->name);
+    }
+} /* portd_add_new_interface */
+
+/**
+ * Update daemon's internal interface data structures based on the latest
+ * data from OVSDB.
+ */
+static void
+update_interface_cache(void)
+{
+    struct shash sh_idl_interfaces;
+    const struct ovsrec_interface *ifrow;
+    struct shash_node *sh_node, *sh_next;
+
+    /* Collect all the interfaces in the DB. */
+    shash_init(&sh_idl_interfaces);
+    OVSREC_INTERFACE_FOR_EACH(ifrow, idl) {
+        if (!shash_add_once(&sh_idl_interfaces, ifrow->name, ifrow)) {
+            VLOG_WARN("interface %s specified twice", ifrow->name);
+        }
+    }
+
+    /* Delete old interfaces. */
+    SHASH_FOR_EACH_SAFE(sh_node, sh_next, &all_interfaces) {
+        struct iface_data *idp =
+            shash_find_data(&sh_idl_interfaces, sh_node->name);
+        if (!idp) {
+            portd_del_old_interface(sh_node);
+        }
+    }
+
+    /* Add new interfaces. */
+    SHASH_FOR_EACH(sh_node, &sh_idl_interfaces) {
+        struct iface_data *idp =
+            shash_find_data(&all_interfaces, sh_node->name);
+        if (!idp) {
+            portd_add_new_interface(sh_node->data);
+        }
+    }
+
+    /* Check for changes in the interface row entries. */
+    SHASH_FOR_EACH(sh_node, &all_interfaces) {
+        struct iface_data *idp = sh_node->data;
+        const struct ovsrec_interface *ifrow =
+            shash_find_data(&sh_idl_interfaces, sh_node->name);
+
+        /* Check for changes to row. */
+        if (OVSREC_IDL_IS_ROW_INSERTED(ifrow, idl_seqno) ||
+            OVSREC_IDL_IS_ROW_MODIFIED(ifrow, idl_seqno)) {
+
+            /* Update eligibility in interfaces that are already in a LAG */
+            if(idp->port_datap && !strncmp(idp->port_datap->name,
+                                           LAG_NAME_SUFFIX,
+                                           LAG_NAME_SUFFIX_LENGTH)) {
+                portd_update_interface_lag_eligibility(idp);
+                portd_update_bond_slaves(idp->port_datap);
+            }
+        }
+    }
+    /* Destroy the shash of the IDL interfaces. */
+    shash_destroy(&sh_idl_interfaces);
+}
+/**
  * This function processes the interface "up"/"down" notifications
  * & MTU notifications that are received from OVSDB.
  * In response to a change in interface
@@ -1401,7 +1548,6 @@ portd_handle_interface_config_mods(void)
 
     VLOG_DBG("portd_intf_admin_state_up_down_events\n");
 
-    VLOG_INFO("Interface user config column modified\n");
     OVSREC_INTERFACE_FOR_EACH (intf_row, idl) {
         port = NULL;
         port_row = NULL;
@@ -2009,10 +2155,322 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
     }
 }
 
+/* Delete an old port found in the internal port cache */
+static void
+portd_del_old_port(struct shash_node *sh_node)
+{
+    if (sh_node) {
+        struct port_lag_data *portp = sh_node->data;
+        struct shash_node *node, *next;
+
+        SHASH_FOR_EACH_SAFE(node, next, &portp->eligible_member_ifs) {
+            struct iface_data *idp =
+                shash_find_data(&all_interfaces, node->name);
+            if (idp) {
+                VLOG_DBG("Removing interface %s from port %s hash map",
+                         idp->name, portp->name);
+
+                shash_delete(&portp->eligible_member_ifs, node);
+                idp->port_datap = NULL;
+            }
+        }
+        free(portp->name);
+        free(portp);
+        shash_delete(&all_ports, sh_node);
+    }
+} /* portd_del_old_port */
+
+/* Add a new port found in the internal port cache */
+static void
+portd_add_new_port(const struct ovsrec_port *port_row)
+{
+    struct port_lag_data *portp = NULL;
+    size_t i;
+    struct ovsrec_interface *intf;
+    struct iface_data *idp;
+
+    VLOG_DBG("Port %s being added!", port_row->name);
+
+    /* Allocate structure to save state information for this interface. */
+    portp = xzalloc(sizeof *portp);
+
+    if (!shash_add_once(&all_ports, port_row->name, portp)) {
+        VLOG_WARN("Port %s specified twice", port_row->name);
+        free(portp);
+    } else {
+        portp->cfg = port_row;
+        portp->name = xstrdup(port_row->name);
+        shash_init(&portp->eligible_member_ifs);
+        shash_init(&portp->bonding_ifs);
+
+        for (i = 0; i < port_row->n_interfaces; i++) {
+            intf = port_row->interfaces[i];
+            idp = shash_find_data(&all_interfaces, intf->name);
+            if (!idp) {
+                VLOG_ERR("Error adding interface to new port %s. "
+                         "Interface %s not found.", portp->name, intf->name);
+            }
+            else {
+                VLOG_DBG("Storing interface %s in port %s hash map",
+                           intf->name, portp->name);
+                shash_add(&portp->eligible_member_ifs, intf->name, (void *)idp);
+                idp->port_datap = portp;
+            }
+        }
+        VLOG_DBG("Created local data for Port %s", port_row->name);
+    }
+} /* portd_add_new_port */
+
+/**
+ * Handles Port related configuration changes for a given port table entry.
+ *
+ * @param row pointer to port row in IDL.
+ * @param portp pointer to daemon's internal port data struct.
+ *
+ * @return
+ */
+
+static void portd_update_bond_slaves(struct port_lag_data *portp)
+{
+    struct shash_node *node;
+    struct iface_data *idp = NULL;
+    const struct ovsrec_interface *ifrow = NULL;
+    struct shash_node *next;
+    bool set_interface_up;
+    const char *state_value;
+
+    /* Find a deleted interface first */
+    SHASH_FOR_EACH_SAFE(node, next, &portp->bonding_ifs) {
+        VLOG_DBG("bond: interface %s to be deleted", node->name);
+        if(!shash_find(&(portp->eligible_member_ifs), node->name)) {
+            if(remove_slave_from_bond(portp->name, node->name)) {
+                VLOG_DBG("bond: Interface %s removed from bond", node->name);
+            }
+            shash_delete(&portp->bonding_ifs, node);
+        }else{
+
+           VLOG_DBG("bond: interface %s in not in eligibles", node->name);
+        }
+    }
+
+    /* Find added interfaces */
+    SHASH_FOR_EACH(node, &portp->eligible_member_ifs) {
+        VLOG_DBG("bond: interface %s to be added", node->name);
+        if(!shash_find(&(portp-> bonding_ifs), node->name)) {
+            set_interface_up = false;
+            idp = shash_find_data(&all_interfaces, node->name);
+            ifrow = idp->cfg;
+
+            state_value = smap_get(&ifrow->user_config,
+                                   INTERFACE_USER_CONFIG_MAP_ADMIN);
+
+            if(state_value != NULL && !strcmp(state_value,
+                                              PORT_INTERFACE_ADMIN_UP)) {
+                portd_interface_up_down(node->name,
+                                        PORT_INTERFACE_ADMIN_DOWN);
+                set_interface_up = true;
+            }
+
+            shash_add(&portp->bonding_ifs, node->name, (void *)idp);
+            if(add_slave_to_bond(portp->name, node->name)) {
+                VLOG_DBG("Interface %s added to bond", node->name);
+            }
+
+            if(set_interface_up) {
+                portd_interface_up_down(node->name, PORT_INTERFACE_ADMIN_UP);
+            }
+
+            VLOG_DBG("bond: interface %s added", node->name);
+        }
+        else{
+           VLOG_DBG("bond: interface %s is in bondings_ifs", node->name);
+        }
+    }
+} /* portd_update_bond_slaves */
+
+/**
+ * Check if an interfaces is eligible by checking the map hw_bond_config and
+ * the key rx_enable and tx_enable.
+ *
+ * @param idp pointer to interface data being select for eligibility.
+ *
+ * @return
+ */
+
+static void
+portd_update_interface_lag_eligibility(struct iface_data *idp)
+{
+
+    if (smap_get_bool(&idp->cfg->hw_bond_config,
+                      INTERFACE_HW_BOND_CONFIG_MAP_RX_ENABLED, false) &&
+        smap_get_bool(&idp->cfg->hw_bond_config,
+                      INTERFACE_HW_BOND_CONFIG_MAP_TX_ENABLED, false)) {
+       VLOG_DBG("bond: interface %s is eligible", idp->name);
+
+        shash_add_once(&idp->port_datap->eligible_member_ifs, idp->name,
+                       (void *)idp);
+
+    } else {
+       VLOG_DBG("bond: interface %s is not eligible", idp->name);
+        shash_find_and_delete(&idp->port_datap->eligible_member_ifs,
+                              idp->name);
+    }
+} /* portd_update_interface_lag_eligibility */
+
+/**
+ * Updates internal caches with new interfaces or delete old interfaces
+ * also, updates bond slaves in order to keep them sycronized with LAG
+ * interfaces.
+ *
+ * @param row pointer to port row in IDL
+ * @param portp pointer to daemon's internal port lag data
+ *
+ * @return
+ */
+static void
+portd_handle_port_config(const struct ovsrec_port *row,
+                         struct port_lag_data *portp)
+{
+    struct ovsrec_interface *intf;
+    struct shash sh_idl_port_intfs;
+    struct shash_node *node, *next;
+    size_t i;
+
+    VLOG_DBG("%s: port %s, n_interfaces=%d",
+             __FUNCTION__, row->name, (int)row->n_interfaces);
+
+    /* Build a new map for this port's interfaces in idl. */
+    shash_init(&sh_idl_port_intfs);
+    for (i = 0; i < row->n_interfaces; i++) {
+        intf = row->interfaces[i];
+        if (!shash_add_once(&sh_idl_port_intfs, intf->name, intf)) {
+            VLOG_WARN("interface %s specified twice", intf->name);
+        }
+    }
+
+    /* Process deleted interfaces first. */
+    SHASH_FOR_EACH_SAFE(node, next, &portp->eligible_member_ifs) {
+        struct ovsrec_interface *ifrow =
+            shash_find_data(&sh_idl_port_intfs, node->name);
+        if (!ifrow) {
+            struct iface_data *idp =
+                shash_find_data(&all_interfaces, node->name);
+            if (idp) {
+                VLOG_DBG("bond: Found a deleted interface %s", node->name);
+                shash_delete(&portp->eligible_member_ifs, node);
+                idp->port_datap = NULL;
+            }
+        }
+    }
+
+    /* Look for newly added interfaces. */
+    SHASH_FOR_EACH(node, &sh_idl_port_intfs) {
+        struct ovsrec_interface *ifrow =
+            shash_find_data(&portp->eligible_member_ifs, node->name);
+        if (!ifrow) {
+            VLOG_DBG("bond: Found an added interface %s in port %s", node->name,
+                     portp->name);
+            struct iface_data *idp =
+                shash_find_data(&all_interfaces, node->name);
+            if (idp) {
+                shash_add(&portp->eligible_member_ifs, node->name, (void *)idp);
+                idp->port_datap = portp;
+            }
+            else {
+                VLOG_ERR("bond: Error adding interface to port %s. "
+                         "Interface %s not found.",
+                         portp->name, node->name);
+            }
+        }
+    }
+
+    /* Update LAG member eligibility for configured member interfaces. */
+    SHASH_FOR_EACH_SAFE(node, next, &portp->eligible_member_ifs) {
+        struct iface_data *idp = shash_find_data(&all_interfaces, node->name);
+        if (idp) {
+            portd_update_interface_lag_eligibility(idp);
+        }
+    }
+
+    if(!strncmp(portp->name, LAG_NAME_SUFFIX, LAG_NAME_SUFFIX_LENGTH)) {
+        portd_update_bond_slaves(portp);
+    }
+
+    /* Destroy the shash of the IDL interfaces. */
+    shash_destroy(&sh_idl_port_intfs);
+} /* portd_handle_port_config */
+
+/**
+ * Handles database reconfigurations in ports
+ *
+ */
+
 static void
 portd_add_del_ports(void)
 {
     struct vrf *vrf;
+    struct shash sh_idl_ports;
+    const struct ovsrec_port *row;
+    struct shash_node *sh_node, *sh_next;
+
+    /* Collect all the ports in the DB. */
+    shash_init(&sh_idl_ports);
+    OVSREC_PORT_FOR_EACH(row, idl) {
+       if (!shash_add_once(&sh_idl_ports, row->name, row)) {
+           VLOG_WARN("port %s specified twice", row->name);
+       }
+    }
+
+    /* Delete old ports. */
+    SHASH_FOR_EACH_SAFE(sh_node, sh_next, &all_ports) {
+        struct port_lag_data *portp = shash_find_data(&sh_idl_ports, sh_node->name);
+        if (!portp) {
+            VLOG_DBG("bond:Found a deleted port %s", sh_node->name);
+
+            /* Check if port's name begins with "lag" to delete Linux bond */
+            if(!strncmp(sh_node->name, LAG_NAME_SUFFIX,
+                        LAG_NAME_SUFFIX_LENGTH)) {
+                if(delete_linux_bond(sh_node->name)) {
+                    VLOG_DBG("bond:Deleted bond %s, ", sh_node->name);
+                }
+            }
+            portd_del_old_port(sh_node);
+        }
+    }
+
+    /* Add new ports. */
+    SHASH_FOR_EACH(sh_node, &sh_idl_ports) {
+        struct port_lag_data *portp = shash_find_data(&all_ports,
+                                                      sh_node->name);
+        if (!portp) {
+            VLOG_DBG("bond:Found an added port %s", sh_node->name);
+
+            /* Check if port's name begins with "lag" to create Linux bond */
+            if(!strncmp(sh_node->name, LAG_NAME_SUFFIX,
+                        LAG_NAME_SUFFIX_LENGTH)) {
+                if(create_linux_bond(sh_node->name)) {
+                    portd_interface_up_down(sh_node->name, "up");
+                }
+            }
+            portd_add_new_port(sh_node->data);
+        }
+    }
+
+    /* Check for changes in the port row entries. */
+    SHASH_FOR_EACH(sh_node, &all_ports) {
+        const struct ovsrec_port *row = shash_find_data(&sh_idl_ports,
+                                                       sh_node->name);
+        /* Check for changes to row. */
+        if (OVSREC_IDL_IS_ROW_INSERTED(row, idl_seqno) ||
+            OVSREC_IDL_IS_ROW_MODIFIED(row, idl_seqno)) {
+            struct port_lag_data *portp = sh_node->data;
+            /* Handle Port config update. */
+            portd_handle_port_config(row, portp);
+        }
+    }
+
+    /* Destroy the shash of the IDL ports. */
+    shash_destroy(&sh_idl_ports);
 
     /* For each vrf in all_vrfs, update the port list */
     HMAP_FOR_EACH (vrf, node, &all_vrfs) {
@@ -2211,6 +2669,8 @@ portd_reconfigure(void)
         portd_intf_config_on_init();
     }
 
+    update_interface_cache();
+
     portd_add_del_ports();
 
     /* IP addresses on kernel and DB are already in sync on init.
@@ -2398,6 +2858,8 @@ ops_portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
 {
     bool *exiting = exiting_;
     *exiting = true;
+    shash_destroy_free_data(&all_ports);
+    shash_destroy_free_data(&all_interfaces);
     unixctl_command_reply(conn, NULL);
 }
 
