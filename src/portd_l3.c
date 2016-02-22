@@ -30,6 +30,7 @@
 #include "openvswitch/vlog.h"
 
 #include "portd.h"
+#include "vrf-utils.h"
 
 VLOG_DEFINE_THIS_MODULE(portd_l3);
 
@@ -718,7 +719,7 @@ portd_add_connected_route(char* ip_address, struct ovsrec_port *ovs_port,
     if (ovs_port)
       row_vrf = get_vrf_row_for_port(ovs_port->name);
 #else
-    row_vrf = ovsrec_vrf_first(idl);
+    row_vrf = get_default_vrf(idl);
 #endif
      if (!row_vrf) {
         VLOG_ERR("No vrf information yet.");

@@ -24,6 +24,7 @@ set (INCL_DIR include)
 include(FindPkgConfig)
 pkg_check_modules(OVSCOMMON REQUIRED libovscommon)
 pkg_check_modules(OVSDB REQUIRED libovsdb)
+pkg_check_modules(OPSUTILS REQUIRED opsutils)
 
 include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}/${INCL_DIR}
                      ${OVSCOMMON_INCLUDE_DIRS}
@@ -37,7 +38,7 @@ set (SOURCES ${SRC_DIR}/portd.c ${SRC_DIR}/portd_l3.c)
 # Rules to build ops-portd
 add_executable (${PORTD} ${SOURCES})
 target_link_libraries (${PORTD} ${OVSCOMMON_LIBRARIES}
-                       ${OVSDB_LIBRARIES}
+                       ${OVSDB_LIBRARIES} ${OPSUTILS_LIBRARIES}
                        -lpthread -lrt)
 
 # Rules to install ops-portd binary in rootfs
