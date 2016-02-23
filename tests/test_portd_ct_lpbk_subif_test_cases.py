@@ -85,7 +85,7 @@ def portd(**kwargs):
     devIntReturn = device1.DeviceInteract(command="vtysh")
     devIntReturn = device1.DeviceInteract(command="ping 192.158.1.5")
     retCode = devIntReturn.get('buffer')
-    assert "5 packets transmitted, 5 packets received" in retCode,\
+    assert "5 packets transmitted, 5 received" in retCode,\
            "ping is not success!!!"
     LogOutput('info', "ping sucess!!!!")
     devIntReturn = device1.DeviceInteract(command="exit")
@@ -118,7 +118,7 @@ def portd(**kwargs):
     devIntReturn = device1.DeviceInteract(command="vtysh")
     devIntReturn = device1.DeviceInteract(command="ping 192.158.1.5")
     retCode = devIntReturn.get('buffer')
-    assert "5 packets transmitted, 5 packets received" not in retCode,\
+    assert "5 packets transmitted, 5 received" not in retCode,\
     "ping is still success"
     devIntReturn = device1.DeviceInteract(command="exit")
 
@@ -232,7 +232,7 @@ def portd(**kwargs):
     devIntReturn = device1.DeviceInteract(command="vtysh")
     devIntReturn = device1.DeviceInteract(command="ping 192.168.1.5")
     retCode = devIntReturn.get('buffer')
-    assert "5 packets transmitted, 5 packets received" in retCode,\
+    assert "5 packets transmitted, 5 received" in retCode,\
            "ping is not success!!!"
     LogOutput('info', "ping sucess!!!!")
     devIntReturn = device1.DeviceInteract(command="exit")
@@ -254,7 +254,7 @@ def portd(**kwargs):
     devIntReturn = device1.DeviceInteract(command="vtysh")
     devIntReturn = device1.DeviceInteract(command="ping 192.168.1.2")
     retCode = devIntReturn.get('buffer')
-    assert "5 packets transmitted, 5 packets received" not in retCode,\
+    assert "5 packets transmitted, 5 received" not in retCode,\
     "ping is still success"
     devIntReturn = device1.DeviceInteract(command="exit")
 

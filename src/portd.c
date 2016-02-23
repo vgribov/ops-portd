@@ -2157,7 +2157,6 @@ portd_add_del_vrf(void)
         vrf->cfg = shash_find_data(&new_vrfs, vrf->name);
         if (!vrf->cfg) {
             portd_vrf_del(vrf);
-            portd_config_iprouting(PORTD_DISABLE_ROUTING);
         }
     }
 
@@ -2166,10 +2165,10 @@ portd_add_del_vrf(void)
         struct vrf *vrf = portd_vrf_lookup(vrf_row->name);
         if (!vrf) {
             portd_vrf_add(vrf_row);
-            portd_config_iprouting(PORTD_ENABLE_ROUTING);
         }
     }
 
+    portd_config_iprouting(PORTD_ENABLE_ROUTING);
     shash_destroy(&new_vrfs);
 }
 
