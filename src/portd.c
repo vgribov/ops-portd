@@ -1032,7 +1032,6 @@ portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
     if(0 == vlan_tag) intf_status = false;
     portd_del_subinterface(port_row->name);
     if (0 != vlan_tag) {
-    {
         VLOG_INFO("Creating subinterface %s", port_row->name);
 
         req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
@@ -1070,7 +1069,6 @@ portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
                     port_row->name, strerror(errno));
             return false;
         }
-    }
     }
     portd_interface_up_down(port_row->name, intf_status ? "up" : "down");
 
@@ -1496,8 +1494,9 @@ portd_handle_interface_config_mods(void)
             if (port && OVSREC_IDL_IS_COLUMN_MODIFIED(
                     ovsrec_interface_col_admin_state, idl_seqno)) {
 
-                if (strcmp(intf_row->admin_state,
-                        PORT_INTERFACE_ADMIN_UP) == 0) {
+                if ((intf_row->admin_state != NULL) &&
+                    (strcmp(intf_row->admin_state,
+                        PORT_INTERFACE_ADMIN_UP) == 0)) {
 
                     struct net_address *addr, *next_addr;
                     /*
@@ -1861,10 +1860,6 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                 /* Port table row modified */
                 VLOG_DBG("Port modified IP: %s vrf %s\n", port_row->ip4_address,
                         vrf->name);
-/*            } else if ((NULL != port->type) &&
-                    (strcmp(port->type,
-                            OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0) ){
-                portd_reconfigure_subinterface(port_row); */
             } else {
                 VLOG_DBG("[%s:%d]: port %s exists, but no change in seqno",
                         __FUNCTION__, __LINE__, port_row->name);
@@ -1882,36 +1877,45 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                             OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0)) {
                 char str[512] = {0};
                 portd_reconfigure_subinterface(port_row);
-                if ( port_row->ip4_address != NULL )
+                if (if_nametoindex(port_row->name))
                 {
-                    nl_add_ip_address(RTM_NEWADDR, port_row->name, port_row->ip4_address,
-                    AF_INET, false);
-                }
-                snprintf(str, 512, "/sbin/ip netns exec swns "
-                            "/sbin/ip -6 address add %s dev %s",
-                            port_row->ip6_address, port_row->name);
-                if (system(str) != 0)
-                {
-                    VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
-                                str, strerror(errno));
+                   if (port_row->ip4_address != NULL)
+                   {
+                       nl_add_ip_address(RTM_NEWADDR, port_row->name,
+                                 port_row->ip4_address, AF_INET, false);
+                   }
+                   if (port_row->ip6_address != NULL)
+                   {
+                        snprintf(str, 512, "/sbin/ip netns exec swns "
+                               "/sbin/ip -6 address add %s dev %s",
+                               port_row->ip6_address, port_row->name);
+                        if (system(str) != 0)
+                        {
+                            VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
+                                        str, strerror(errno));
+                        }
+                   }
                 }
             }
             if((NULL != port->type) &&
                     (strcmp(port->type,
                             OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
                 char str[512] = {0};
-                if ( port_row->ip4_address != NULL )
+                if (port_row->ip4_address != NULL)
                 {
-                    nl_add_ip_address(RTM_NEWADDR, port_row->name, port_row->ip4_address,
-                    AF_INET, false);
+                    nl_add_ip_address(RTM_NEWADDR, port_row->name,
+                               port_row->ip4_address, AF_INET, false);
                 }
-                snprintf(str, 512, "/sbin/ip netns exec swns "
+                if (port_row->ip6_address != NULL)
+                {
+                    snprintf(str, 512, "/sbin/ip netns exec swns "
                             "/sbin/ip -6 address add %s dev lo:%s",
                             port_row->ip6_address, port_row->name+2);
-                if (system(str) != 0)
-                {
-                    VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
-                                str, strerror(errno));
+                    if (system(str) != 0)
+                    {
+                        VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
+                                    str, strerror(errno));
+                    }
                 }
             }
         }
