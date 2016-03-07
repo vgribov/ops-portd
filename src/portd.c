@@ -25,6 +25,7 @@
  * - Add/delete intervlan interfaces
  */
 
+#define _GNU_SOURCE
 #include <err.h>
 #include <errno.h>
 #include <getopt.h>
@@ -36,7 +37,13 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <sched.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 /* OVSDB Includes */
 #include "config.h"
@@ -205,6 +212,13 @@ static void portd_handle_port_config(const struct ovsrec_port *row,
                                      struct port_lag_data *portp);
 static void portd_update_interface_lag_eligibility(struct iface_data *idp);
 
+void
+portd_reconfig_ns_loopback(struct port *port,
+                           struct ovsrec_port *port_row);
+
+void
+portd_reconfig_loopback_ipaddr(struct port *port,
+                           struct ovsrec_port *port_row);
 /*
  * Lookup port entry from DB
  */
@@ -1207,7 +1221,7 @@ portd_reconfigure_loopback_interface(const struct ovsrec_port *port_row)
        if(p)
        {
            *p++ = '\0';
-           prefixlen = atoi(p);
+           prefixlen = 32;
        }
        masklen2ip(prefixlen, netmask);
 
@@ -1995,10 +2009,10 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
 
         } else if (port) {
             if (OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) {
-                if((NULL != port->type) &&
+                if ((NULL != port->type) &&
                         (strcmp(port->type,
                                 OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
-                    portd_reconfigure_loopback_interface(port_row);
+                    portd_reconfig_ns_loopback(port, port_row);
                     continue;
                 }
                 portd_reconfig_ipaddr(port, port_row);
@@ -2046,23 +2060,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
             if((NULL != port->type) &&
                     (strcmp(port->type,
                             OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
-                char str[512] = {0};
-                if (port_row->ip4_address != NULL)
-                {
-                    nl_add_ip_address(RTM_NEWADDR, port_row->name,
-                               port_row->ip4_address, AF_INET, false);
-                }
-                if (port_row->ip6_address != NULL)
-                {
-                    snprintf(str, 512, "/sbin/ip netns exec swns "
-                            "/sbin/ip -6 address add %s dev lo:%s",
-                            port_row->ip6_address, port_row->name+2);
-                    if (system(str) != 0)
-                    {
-                        VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
-                                    str, strerror(errno));
-                    }
-                }
+               portd_reconfig_ns_loopback(port, port_row);
             }
         }
     }
@@ -2861,6 +2859,69 @@ ops_portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
     shash_destroy_free_data(&all_ports);
     shash_destroy_free_data(&all_interfaces);
     unixctl_command_reply(conn, NULL);
+}
+
+void
+portd_reconfig_ns_loopback(struct port *port,
+                           struct ovsrec_port *port_row)
+{
+    int fd;
+    char ns[512] = {0};
+    int pid = fork();
+    int status;
+
+    if (pid){ /*Parent Process waits child to exit*/
+      portd_reconfig_loopback_ipaddr(port, port_row);
+      wait(&status);
+    }else {
+
+      sprintf(ns, "/proc/1/ns/net");
+
+      fd = open(ns, O_RDONLY);   /* Get descriptor for namespace */
+
+      if (fd == -1)
+      {
+          VLOG_ERR("Unable to open global namespace.");
+          return;
+      }
+
+      if (setns(fd, 0) == -1)         /* Join that namespace */
+      {
+          VLOG_ERR("Unable to join global namespace.");
+          return;
+      }
+
+      portd_reconfig_loopback_ipaddr(port, port_row);
+      close(fd);
+      exit(0);
+   }
+}
+
+void
+portd_reconfig_loopback_ipaddr(struct port *port,
+                           struct ovsrec_port *port_row)
+{
+    char cmd[512] = {0};
+    if (port->ip6_address){
+       if (port_row->ip6_address){
+          if (strcmp(port->ip6_address, port_row->ip6_address) == 0) {
+             sprintf(cmd,"/sbin/ip -6 address add %s dev lo:%s",
+                     port->ip6_address, port->name+2);
+          }else {
+             sprintf(cmd, "/sbin/ip addr del %s dev lo:%s",
+                     port->ip6_address, port->name+2);
+          }
+       }else{
+          sprintf(cmd, "/sbin/ip addr del %s dev lo:%s",
+                  port->ip6_address, port->name+2);
+       }
+       if (system(cmd) != 0){
+           VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
+                    cmd, strerror(errno));
+       }
+    }
+   portd_reconfig_ipaddr(port, port_row);
+   portd_reconfigure_loopback_interface(port_row);
 }
 
 int
