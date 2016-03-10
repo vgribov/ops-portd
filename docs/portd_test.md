@@ -9,6 +9,7 @@
 - [Add IPv6 address](#add-ipv6-address)
 - [Delete IPv6 address](#delete-ipv6-address)
 - [Delete vlan interface](#delete-vlan-interface)
+- [Validate Linux bonding driver configuration when LAG is configured](#validate-linux-bonding-driver-configuration-when-lag-is-configured)
 
 ##  Create vlan interface
 ### Objective
@@ -150,3 +151,64 @@ $ ifconfig -a
 #### Test Pass Criteria
 vlan interface (vlan10) created earlier should no longer exist.
 #### Test Fail Criteria
+
+## Validate Linux bonding driver configuration when LAG is configured
+### Objective
+Verify that Linux bonding driver is properly configured when LAGs are created
+and deleted, also when interfaces are added and removed.
+### Requirements
+- Virtual Mininet Test Setup
+- **CT File**: ops-portd/test/test_portd_ct_linux_bonding_driver_configuration.py
+
+### Setup
+#### Topology diagram
+```ditaa
+
+   +-----+------+
+   |            |
+   |  Switch 1  |
+   |            |
+   +-+---+---+--+
+     |   |   |
+     |   |   |      LAG 1
+     |   |   |
+   +-+---+---+--+
+   |            |
+   |  Switch 2  |
+   |            |
+   +-----+------+
+
+```
+
+### Description
+This test verifies Linux bonding drivers files are configured correctly when
+LAG is created/deleted and when interfaces are added/removed.
+
+  1. Create LAG in both switches with interfaces 1 and 2.
+  2. Execute "ifconfig" and check if Linux bond interface exists.
+  3. Add interface 3 to the LAG in both switches.
+  4. Check the slaves associated to the Linux bond in the file:
+     /sys/class/net/<lag_name>/bonding/slaves.
+  5. Remove interface 1 from LAG in switch 1.
+  6. Remove interface 2 from LAG in switch 2.
+  7. Check the slaves associated to the Linux bond in the file:
+     /sys/class/net/<lag_name>/bonding/slaves.
+  8. Delete LAG in both switches.
+  9. Execute "ifconfig" and check if Linux bond interface exists.
+
+
+### Test Result Criteria
+#### Test Pass Criteria
+ 1. A Linux bond interface specific for the LAG is created when the LAG is
+    configured and is deleted when the LAG is removed.
+ 2. The interfaces added to a LAG are also associated as slaves of the Linux
+    bond of that LAG.
+ 3. The interfaces removed from a LAG are also removed from the list of
+    slaves of the Linux bond for that LAG.
+#### Test Fail Criteria
+ 1. A Linux bond interface specific for the LAG is not created when the LAG is
+    configured or is not deleted when the LAG is removed.
+ 2. The interfaces added to a LAG are not associated as slaves of the Linux
+    bond of that LAG.
+ 3. The interfaces removed from a LAG are not removed from the list of
+    slaves of the Linux bond for that LAG.
