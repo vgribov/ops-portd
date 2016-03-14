@@ -107,6 +107,28 @@ portd_config_proxy_arp(struct port *port, char *str, int enable)
              (enable == 1 ? "Enabled" : "Disabled"), str);
 }
 
+/* write to /proc entries to enable/disable local proxy ARP on the port */
+void
+portd_config_local_proxy_arp(struct port *port, char *str, int enable)
+{
+    char local_proxy_arp_str[100] = {0};
+
+    snprintf(local_proxy_arp_str, sizeof(local_proxy_arp_str),
+            "sysctl net.ipv4.conf.%s.proxy_arp_pvlan=%d", str,enable);
+
+    if (system(local_proxy_arp_str) != 0) {
+        VLOG_DBG("Failed to modify the local proxy ARP state via sysctl");
+        return;
+    }
+
+    if(enable) {
+        port->local_proxy_arp_enabled = true;
+    } else {
+        port->local_proxy_arp_enabled = false;
+    }
+    VLOG_DBG("%s Local proxy ARP", (enable == 1 ? "Enabled" : "Disabled"));
+}
+
 /* write to /proc entries to enable/disable Linux ip forwarding(routing) */
 void
 portd_config_iprouting(int enable)

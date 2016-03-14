@@ -1986,6 +1986,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
     struct smap hw_cfg_smap;
     char *cur_state = NULL;
     char *proxy_arp_state = NULL;
+    char *local_proxy_arp_state = NULL;
 
     SHASH_FOR_EACH (port_node, wanted_ports) {
         struct ovsrec_port *port_row = port_node->data;
@@ -2092,6 +2093,23 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                         if (port->proxy_arp_enabled) {
                             portd_config_proxy_arp(port, port_row->name,
                                                    PORTD_DISABLE_PROXY_ARP);
+                        }
+                    }
+                    /* Check if  local proxy arp state has changed */
+                    local_proxy_arp_state = (char *)smap_get(
+                                      &port_row->other_config,
+                                      PORT_OTHER_CONFIG_MAP_LOCAL_PROXY_ARP_ENABLED);
+
+                    if (local_proxy_arp_state && (VTYSH_STR_EQ(local_proxy_arp_state,
+                        PORT_OTHER_CONFIG_MAP_LOCAL_PROXY_ARP_ENABLED_TRUE))) {
+                        if (!port->local_proxy_arp_enabled) {
+                            portd_config_local_proxy_arp(port, port_row->name,
+                                                   PORTD_ENABLE_LOCAL_PROXY_ARP);
+                        }
+                    } else {
+                        if (port->local_proxy_arp_enabled) {
+                            portd_config_local_proxy_arp(port, port_row->name,
+                                                   PORTD_DISABLE_LOCAL_PROXY_ARP);
                         }
                     }
                 }
@@ -2232,6 +2250,11 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
             if (port->proxy_arp_enabled) {
                 portd_config_proxy_arp(port, port->name,
                                        PORTD_DISABLE_PROXY_ARP);
+            }
+
+            if (port->local_proxy_arp_enabled) {
+                portd_config_local_proxy_arp(port, port->name,
+                                       PORTD_DISABLE_LOCAL_PROXY_ARP);
             }
 
             /* Port not present in the wanted_ports list. Destroy */
