@@ -66,6 +66,8 @@
 #include "portd.h"
 #include "linux_bond.h"
 
+#include "eventlog.h"
+
 VLOG_DEFINE_THIS_MODULE(ops_portd);
 
 COVERAGE_DEFINE(portd_reconfigure);
@@ -713,6 +715,8 @@ portd_netlink_socket_open(int *sock, bool is_init_sock)
 
     if (*sock < 0) {
         VLOG_ERR("Netlink socket creation failed (%s)",strerror(errno));
+        log_event("PORT_SOCKET_CREATION_FAIL",
+            EV_KV("error", "%s", strerror(errno)));
         return;
     }
 
@@ -724,6 +728,8 @@ portd_netlink_socket_open(int *sock, bool is_init_sock)
     }
     if (bind(*sock, (struct sockaddr *) &s_addr, sizeof(s_addr)) < 0) {
         VLOG_ERR("Netlink socket bind failed (%s)",strerror(errno));
+        log_event("PORT_SOCKET_BIND_FAIL",
+            EV_KV("error", "%s", strerror(errno)));
         return;
     }
 
@@ -743,6 +749,8 @@ portd_netlink_socket_open(int *sock, bool is_init_sock)
 static void
 portd_init(const char *remote)
 {
+    int retval;
+
     idl = ovsdb_idl_create(remote, &ovsrec_idl_class, false, true);
     idl_seqno = ovsdb_idl_get_seqno(idl);
     ovsdb_idl_set_lock(idl, "ops_portd");
@@ -849,6 +857,11 @@ portd_init(const char *remote)
     /* By default, we disable routing at the start.
      * Enabling will be done as part of reconfigure. */
     portd_config_iprouting(PORTD_DISABLE_ROUTING);
+
+    retval = event_log_init("PORT");
+    if(retval < 0) {
+        VLOG_ERR("Event log initialization failed for PORT");
+    }
 }
 
 static void
@@ -964,6 +977,8 @@ portd_set_interface_mtu(const char *interface_name, unsigned int mtu)
     if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to set mtu %d for interface %s", mtu,
                  interface_name);
+        log_event("PORT_MTU_FAIL", EV_KV("mtu", "%d", mtu),
+            EV_KV("interface", "%s", interface_name));
         return;
     }
 }
@@ -1022,6 +1037,8 @@ portd_interface_up_down(const char *interface_name, const char *status)
     if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to bring %s the interface %s", status,
                  interface_name);
+        log_event("PORT_INTERFACE_FAIL", EV_KV("status", "%s", status),
+            EV_KV("interface", "%s", interface_name));
         return;
     }
 }
@@ -1803,6 +1820,8 @@ portd_alloc_internal_vlan(void)
                 SYSTEM_OTHER_CONFIG_MAP_INTERNAL_VLAN_POLICY_DESCENDING) != 0)) {
             VLOG_ERR("Unknown internal vlan policy '%s'",
                       internal_vlan_policy);
+            log_event("PORT_UNKNOWN_VLAN_POLICY",
+                EV_KV("policy", "%s", internal_vlan_policy));
             return -1;
         }
     } else {
@@ -1914,6 +1933,8 @@ portd_add_internal_vlan(struct port *port, struct ovsrec_port *port_row)
     vid = portd_alloc_internal_vlan();
     if (vid == -1) {
         VLOG_ERR("Error allocating internal vlan for port '%s'", port_row->name);
+        log_event("PORT_VLAN_ALLOCATION_ERROR",
+            EV_KV("vlan", "%s", port_row->name));
         portd_set_status_error(port_row, PORT_STATUS_MAP_ERROR_NO_INTERNAL_VLAN);
         return;
     }
