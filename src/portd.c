@@ -60,6 +60,8 @@
 #include "stream.h"
 #include "unixctl.h"
 #include "vlan-bitmap.h"
+#include "eventlog.h"
+#include  <diag_dump.h>
 
 #include "portd.h"
 #include "linux_bond.h"
@@ -70,6 +72,8 @@ COVERAGE_DEFINE(portd_reconfigure);
 
 #define LAG_NAME_SUFFIX_LENGTH    3
 #define LAG_NAME_SUFFIX           "lag"
+#define BUF_LEN 16000
+#define MAX_ERR_STR_LEN 500
 
 int nl_sock; /* Netlink socket */
 int init_sock; /* This sock will only be used during init */
@@ -212,13 +216,21 @@ static void portd_handle_port_config(const struct ovsrec_port *row,
                                      struct port_lag_data *portp);
 static void portd_update_interface_lag_eligibility(struct iface_data *idp);
 
-void
+int
 portd_reconfig_ns_loopback(struct port *port,
                            struct ovsrec_port *port_row);
 
 void
 portd_reconfig_loopback_ipaddr(struct port *port,
                            struct ovsrec_port *port_row);
+void
+portd_register_event_log(struct ovsrec_port *port_row,
+                                     struct port *port);
+static void portd_dump(char* buf, int buflen, const char* feature);
+static void portd_diag_dump_basic_subif_lpbk(const char *feature , char **buf);
+
+int subintf_count;
+int lpbk_count;
 /*
  * Lookup port entry from DB
  */
@@ -825,9 +837,9 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_route_col_selected);
     ovsdb_idl_omit_alert(idl, &ovsrec_route_col_selected);
 
+    INIT_DIAG_DUMP_BASIC(portd_diag_dump_basic_subif_lpbk);
     unixctl_command_register("portd/dump", "", 0, 0,
                              portd_unixctl_dump, NULL);
-
     /*
      * Open a netlink socket for communication with the kernel
      */
@@ -1058,9 +1070,19 @@ portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
 
     bool intf_status = false;
     if(intf_row->n_subintf_parent)
-    {
+    {   static int old_tag = 0;
         parent_intf_row = intf_row->value_subintf_parent[0];
         vlan_tag = (unsigned short)intf_row->key_subintf_parent[0];
+        if ((OVSREC_IDL_IS_ROW_MODIFIED(intf_row, idl_seqno)) &&
+           (OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_interface_col_subintf_parent,
+                                          idl_seqno))) {
+            if (old_tag != vlan_tag){
+               log_event("SUBINTERFACE_ENC_UPDATE", EV_KV("interface",
+                      "%s", port_row->name),
+                      EV_KV("value", "%d", vlan_tag));
+               old_tag = vlan_tag;
+           }
+       }
     }
 
     if (parent_intf_row && (strcmp(parent_intf_row->admin_state,
@@ -1211,7 +1233,6 @@ portd_reconfigure_loopback_interface(const struct ovsrec_port *port_row)
 
     /* get interface name */
     strncpy(ifr.ifr_name, loopback_name, sizeof(loopback_name)/sizeof(char));
-
     if (port_row->ip4_address)
     {
        char *ip_address = xstrdup(port_row->ip4_address);
@@ -1961,10 +1982,14 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                     port_row->name)) {
                 portd_reconfigure_subinterface(port_row);
                 port->type = xstrdup(OVSREC_INTERFACE_TYPE_VLANSUBINT);
+                subintf_count++;
+                log_event("SUBINTERFACE_CREATE", EV_KV("interface", "%s", port_row->name));
             } else if (portd_interface_type_loopback_check(port_row,
                     port_row->name)) {
                 portd_reconfigure_loopback_interface(port_row);
                 port->type = xstrdup(OVSREC_INTERFACE_TYPE_LOOPBACK);
+                lpbk_count++;
+                log_event("LOOPBACK_CREATE", EV_KV("interface", "%s", port_row->name));
             } else {
                 /* Only assign internal VLAN if not already present. */
                 smap_clone(&hw_cfg_smap, &port_row->hw_config);
@@ -2013,9 +2038,11 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                         (strcmp(port->type,
                                 OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
                     portd_reconfig_ns_loopback(port, port_row);
+                    portd_register_event_log(port_row, port);
                     continue;
                 }
                 portd_reconfig_ipaddr(port, port_row);
+                portd_register_event_log(port_row, port);
                 portd_port_admin_state_reconfigure(port, port_row);
                 /* Port table row modified */
                 VLOG_DBG("Port modified IP: %s vrf %s\n", port_row->ip4_address,
@@ -2043,6 +2070,9 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                    {
                        nl_add_ip_address(RTM_NEWADDR, port_row->name,
                                  port_row->ip4_address, AF_INET, false);
+                        log_event("SUBINTERFACE_IP_UPDATE", EV_KV("interface",
+                                  "%s", port_row->name),
+                                  EV_KV("value", "%s", port_row->ip4_address));
                    }
                    if (port_row->ip6_address != NULL)
                    {
@@ -2139,10 +2169,16 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
             else if(port->type &&
                     (strcmp(port->type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0)) {
                 portd_del_subinterface(port->name);
+                subintf_count--;
+                log_event("SUBINTERFACE_DELETE", EV_KV("interface",
+                               "%s", port->name));
             }
             else if(port->type &&
                     (strcmp(port->type, OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
                      portd_delete_loopback_interface(port->name);
+                     lpbk_count--;
+                     log_event("LOOPBACK_DELETE", EV_KV("interface",
+                               "%s", port->name));
             }
 
             /* Port not present in the wanted_ports list. Destroy */
@@ -2756,11 +2792,52 @@ portd_wait(void)
     poll_timer_wait(PORTD_POLL_INTERVAL * 1000);
 }
 
+
 static void
 portd_unixctl_dump(struct unixctl_conn *conn, int argc OVS_UNUSED,
                    const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
 {
-    unixctl_command_reply_error(conn, "Nothing to dump :)");
+       char err_str[MAX_ERR_STR_LEN];
+       char *buf = xcalloc(1, BUF_LEN);
+       if (buf){
+               portd_dump(buf, BUF_LEN, "sub-interface");
+               unixctl_command_reply(conn, buf);
+               portd_dump(buf, BUF_LEN, "loopback");
+               unixctl_command_reply(conn, buf);
+               free(buf);
+       } else {
+               snprintf(err_str,sizeof(err_str),
+                               "portd daemon failed to allocate %d bytes", BUF_LEN );
+               unixctl_command_reply(conn, err_str );
+       }
+       return;
+}
+
+static void
+portd_dump(char* buf, int buflen, const char* feature)
+{
+    if (strcmp(feature, "sub-interface") == 0)
+       sprintf(buf, "Number of Configured sub-interfaces are : %d.", subintf_count);
+    else if (strcmp(feature, "loopback") == 0)
+       sprintf(buf, "Number of Configured loopback interfaces are : %d.", lpbk_count);
+}
+
+static void
+portd_diag_dump_basic_subif_lpbk(const char *feature , char **buf)
+{
+     if (!buf)
+             return;
+     *buf =  xcalloc(1,BUF_LEN);
+     if (*buf) {
+         portd_dump(*buf, BUF_LEN, feature);
+         /* populate basic diagnostic data to buffer  */
+         VLOG_DBG("basic diag-dump data populated for feature %s",
+                  feature);
+     }else{
+         VLOG_ERR("Memory allocation failed for feature %s , %d bytes",
+                  feature , BUF_LEN);
+     }
+     return ;
 }
 
 static void
@@ -2861,40 +2938,41 @@ ops_portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
     unixctl_command_reply(conn, NULL);
 }
 
-void
+int
 portd_reconfig_ns_loopback(struct port *port,
                            struct ovsrec_port *port_row)
 {
     int fd;
     char ns[512] = {0};
-    int pid = fork();
     int status;
+    int pid = fork();
 
     if (pid){ /*Parent Process waits child to exit*/
       portd_reconfig_loopback_ipaddr(port, port_row);
       wait(&status);
-    }else {
-
+      return EXIT_SUCCESS;
+    }else{
       sprintf(ns, "/proc/1/ns/net");
-
       fd = open(ns, O_RDONLY);   /* Get descriptor for namespace */
 
       if (fd == -1)
       {
           VLOG_ERR("Unable to open global namespace.");
-          return;
+          _exit(EXIT_SUCCESS);
       }
 
       if (setns(fd, 0) == -1)         /* Join that namespace */
       {
           VLOG_ERR("Unable to join global namespace.");
-          return;
+          close(fd);
+          _exit(EXIT_SUCCESS);
       }
 
       portd_reconfig_loopback_ipaddr(port, port_row);
       close(fd);
-      exit(0);
+      _exit(EXIT_SUCCESS);
    }
+   return EXIT_SUCCESS;
 }
 
 void
@@ -2922,6 +3000,96 @@ portd_reconfig_loopback_ipaddr(struct port *port,
     }
    portd_reconfig_ipaddr(port, port_row);
    portd_reconfigure_loopback_interface(port_row);
+}
+
+void
+portd_register_event_log(struct ovsrec_port *port_row,
+                                     struct port *port) {
+    bool admin_modified = false;
+    bool ipv6_add = false;
+    bool ipv6_delete = false;
+    bool ipv4_add = false;
+    bool ipv4_delete = false;
+
+    if (OVSREC_IDL_IS_COLUMN_MODIFIED(
+             ovsrec_port_col_ip4_address, idl_seqno)) {
+       if (port->ip4_address) {
+          if (port_row->ip4_address) {
+             ipv4_add = true;
+          }else {
+             ipv4_delete = true;
+       }
+     }else {
+        ipv4_delete = true;
+       }
+    }
+    else if (OVSREC_IDL_IS_COLUMN_MODIFIED(
+             ovsrec_port_col_ip6_address, idl_seqno)) {
+       if (port->ip6_address) {
+          if (port_row->ip6_address) {
+             ipv6_add = true;
+          }else {
+             ipv6_delete = true;
+         }
+      } else {
+           ipv6_delete = true;
+      }
+    }
+    else if (OVSREC_IDL_IS_COLUMN_MODIFIED(
+             ovsrec_port_col_admin, idl_seqno)) {
+       admin_modified = true;
+    }
+
+   if (NULL != port->type){
+      if (strcmp(port->type,
+          OVSREC_INTERFACE_TYPE_LOOPBACK) == 0) {
+          if (ipv6_add == true){
+               log_event("LOOPBACK_IP_UPDATE", EV_KV("interface",
+                         "%s", port_row->name),
+                         EV_KV("value", "%s",
+                         port_row->ip6_address));
+          }else if (ipv6_delete == true){
+               log_event("LOOPBACK_IPV6_DELETE", EV_KV("interface",
+                          "%s", port_row->name));
+          }
+
+          if (ipv4_add == true){
+               log_event("LOOPBACK_IP_UPDATE", EV_KV("interface",
+                         "%s", port_row->name),
+                         EV_KV("value", "%s",
+                         port_row->ip4_address));
+          }else if (ipv4_delete == true){
+               log_event("LOOPBACK_IPV4_DELETE", EV_KV("interface",
+                          "%s", port_row->name));
+          }
+     }else if (strcmp(port->type,
+         OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0) {
+         if (ipv6_add == true){
+              log_event("SUBINTERFACE_IP_UPDATE", EV_KV("interface",
+                        "%s", port_row->name),
+                        EV_KV("value", "%s",
+                        port_row->ip6_address));
+         }else if (ipv6_delete == true){
+              log_event("SUBINTERFACE_IPV6_DELETE", EV_KV("interface",
+                         "%s", port_row->name));
+         }
+
+         if (ipv4_add == true){
+              log_event("SUBINTERFACE_IP_UPDATE", EV_KV("interface",
+                        "%s", port_row->name),
+                        EV_KV("value", "%s",
+                        port_row->ip4_address));
+         }else if (ipv4_delete == true){
+              log_event("SUBINTERFACE_IPV4_DELETE", EV_KV("interface",
+                         "%s", port_row->name));
+         }
+         if (admin_modified == true){
+            log_event("SUBINTERFACE_ADMIN_STATE", EV_KV("interface",
+                   "%s", port_row->name),
+                   EV_KV("state", "%s", port_row->admin));
+        }
+     }
+   }
 }
 
 int
@@ -2952,6 +3120,11 @@ main(int argc, char *argv[])
     free(remote);
     daemonize_complete();
     vlog_enable_async();
+    retval = event_log_init("SUBINTERFACE");
+    retval = event_log_init("LOOPBACK");
+    if(retval < 0) {
+         VLOG_ERR("Event log initialization failed");
+     }
 
     exiting = false;
     while (!exiting) {

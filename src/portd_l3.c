@@ -28,6 +28,7 @@
 
 #include "hash.h"
 #include "openvswitch/vlog.h"
+#include "eventlog.h"
 
 #include "portd.h"
 #include "vrf-utils.h"

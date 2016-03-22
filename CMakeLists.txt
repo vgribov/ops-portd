@@ -39,7 +39,7 @@ set (SOURCES ${SRC_DIR}/portd.c ${SRC_DIR}/portd_l3.c ${SRC_DIR}/linux_bond.c)
 add_executable (${PORTD} ${SOURCES})
 target_link_libraries (${PORTD} ${OVSCOMMON_LIBRARIES}
                        ${OVSDB_LIBRARIES} ${OPSUTILS_LIBRARIES}
-                       -lpthread -lrt)
+                       -lpthread -lrt -lsupportability)
 
 # Rules to install ops-portd binary in rootfs
 install(TARGETS ${PORTD}
