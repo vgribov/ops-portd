@@ -103,6 +103,7 @@ class connectedRoutesCTTest(OpsVsiTest):
         info('########## Test Passed ##########\n\n\n')
 
 
+@pytest.mark.skipif(True, reason="Disabling old tests")
 class Test_portd_connected_routes:
 
     def setup_class(cls):

@@ -98,6 +98,7 @@ class Inter_VLAN_Interface_CT(OpsVsiTest):
              'passed. ##########\n\n')
 
 
+@pytest.mark.skipif(True, reason="Disabling old tests")
 class Test_portd_intervlan_interface:
 
     def setup_class(cls):

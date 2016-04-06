@@ -124,6 +124,7 @@ class adminstateupdateCTTest( OpsVsiTest ):
         assert port_down in output, 'Port state remains up'
         info('### Port state changed to down as the port is down ###\n');
 
+@pytest.mark.skipif(True, reason="Disabling old tests")
 class Test_portd_admin_state_update:
 
     def setup_class(cls):

@@ -684,6 +684,7 @@ def portd_functionality_tc7(**kwargs):
 
 
 @pytest.mark.timeout(500)
+@pytest.mark.skipif(True, reason="Disabling old tests")
 class Test_portd_functionality:
 
     def setup_class(cls):

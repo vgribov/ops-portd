@@ -269,6 +269,7 @@ def portd(**kwargs):
     assert "inet addr:192.168.1.5" not in retCode, "Failed to remove lo:1"
 
 
+@pytest.mark.skipif(True, reason="Disabling old tests")
 class Test_portd:
     def setup_class(cls):
         # Test object will parse command line and formulate the env
