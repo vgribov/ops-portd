@@ -236,6 +236,7 @@ portd_register_event_log(struct ovsrec_port *port_row,
                                      struct port *port);
 static void portd_dump(char* buf, int buflen, const char* feature);
 static void portd_diag_dump_basic_subif_lpbk(const char *feature , char **buf);
+static bool portd_check_vlan_interface(char *port_name);
 
 int subintf_count;
 int lpbk_count;
@@ -1903,6 +1904,25 @@ portd_del_internal_vlan(int internal_vid)
     }
 }
 
+static bool
+portd_check_vlan_interface(char *port_name)
+{
+    const struct ovsrec_port *port_row;
+    bool interface_vlan_found;
+
+    /*
+     * Check if vlan is configured as by interface VLAN.
+     */
+
+    interface_vlan_found = false;
+    OVSREC_PORT_FOR_EACH (port_row, idl) {
+        if (!strncmp(port_row->name, port_name, strlen(port_name))) {
+            interface_vlan_found = true;
+        }
+    }
+    return interface_vlan_found;
+}
+
 /* FIXME - update port table status column with error if no VLAN allocated. */
 static int
 portd_alloc_internal_vlan(void)
@@ -1973,6 +1993,16 @@ portd_alloc_internal_vlan(void)
             for (j = ascending ? min_internal_vlan : max_internal_vlan;
                  ascending ? j <= max_internal_vlan : j >= min_internal_vlan;
                  ascending ? j++ : j--) {
+
+                char port_name[8] = {0};
+                char vlan_id[4] = {0};
+
+                strncat(port_name, INTERFACE_TYPE_VLAN, strlen(INTERFACE_TYPE_VLAN));
+                sprintf(vlan_id, "%d", j);
+                strncat(port_name, vlan_id, strlen(vlan_id));
+                if (portd_check_vlan_interface(port_name)) {
+                    continue;
+                }
                 if (!bitmap_is_set(vlans_bmp,j)) {
                     VLOG_DBG("Allocated internal vlan (%d)", j);
                     vlan_allocated = j;
