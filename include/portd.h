@@ -140,6 +140,60 @@ struct kernel_port {
     struct hmap ip6addr; /*List of IPv6 addresses */
 };
 
+/* A protocol object part of some forwarding layer object */
+struct portd_arbiter_proto_class {
+    /* The id associated with the protocol */
+    enum ovsrec_port_forwarding_state_proto_e id;
+
+    /* The forwarding layer to which this protocol belongs to */
+    struct portd_arbiter_layer_class *layer;
+
+    /* Function that runs and determines if the forwarding state
+     * needs to change based on the current protocols state */
+    bool (*run) (struct portd_arbiter_proto_class *proto,
+                 const struct ovsrec_port *port);
+
+    /* Function that returns the protocols view of the forwarding
+     * state of the port. */
+    bool (*get_state) (const struct ovsrec_port *port);
+
+    /* Next protocol in the forwarding layer */
+    struct portd_arbiter_proto_class *next;
+};
+
+/* A forwarding layer object */
+struct portd_arbiter_layer_class {
+    /* The id associated with the forwarding layer */
+    enum ovsrec_port_forwarding_state_layer_e id;
+
+    /* The protocol that is currently determining the state of the forwarding layer */
+    enum ovsrec_port_forwarding_state_proto_e owner;
+
+    /* A list of protocols operating at this layer.
+     * The order of the list determines precedence among protocols.
+     * The protocol at the lower index trumps the one at a higher index. */
+    struct portd_arbiter_proto_class *protos;
+
+    /* Boolean variable that tells if the forwarding state of the give layer is blocked */
+    bool blocked;
+
+    /* Function that determines if the forwarding state of the layer has to change */
+    bool (*run) (struct portd_arbiter_layer_class *layer,
+                 const struct ovsrec_port *port);
+
+    /* Pointer to the previous forwarding layer in the hierarchy */
+    struct portd_arbiter_layer_class *prev;
+
+    /* Pointer to the next forwarding layer in the hierarchy */
+    struct portd_arbiter_layer_class *next;
+};
+
+/* A port arbiter object */
+struct portd_arbiter_class {
+    /* A list of forwarding layers applicable for this object */
+    struct portd_arbiter_layer_class *layers;
+};
+
 struct ovsrec_port* portd_port_db_lookup(const char *);
 /* Helper functions to identify intervlan interfaces */
 bool portd_interface_type_internal_check(const struct ovsrec_port *port,
@@ -174,4 +228,8 @@ void portd_config_local_proxy_arp(struct port *port, char *str, int enable);
 
 unsigned int portd_if_nametoindex(struct vrf *vrf, const char *name);
 
+void portd_arbiter_init(void);
+void portd_arbiter_run(void);
+void portd_arbiter_port_run(const struct ovsrec_port *port,
+                            struct smap *forwarding_state);
 #endif /* PORTD_H_ */

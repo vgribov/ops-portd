@@ -33,7 +33,8 @@ include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}/${INCL_DIR}
 set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror")
 
 # Source files to build ops-portd
-set (SOURCES ${SRC_DIR}/portd.c ${SRC_DIR}/portd_l3.c ${SRC_DIR}/linux_bond.c)
+set (SOURCES ${SRC_DIR}/portd.c ${SRC_DIR}/portd_l3.c ${SRC_DIR}/linux_bond.c
+             ${SRC_DIR}/portd_arbiter.c)
 
 # Rules to build ops-portd
 add_executable (${PORTD} ${SOURCES})

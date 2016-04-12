@@ -841,6 +841,9 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_port_col_status);
     ovsdb_idl_omit_alert(idl, &ovsrec_port_col_status);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_other_config);
+    ovsdb_idl_add_column(idl, &ovsrec_port_col_forwarding_state);
+    ovsdb_idl_omit_alert(idl, &ovsrec_port_col_forwarding_state);
+
     /*
      * Adding the interface table so that we can listen to interface
      * "up"/"down" notifications. We need to add two columns to the
@@ -859,6 +862,7 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_type);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_subintf_parent);
     ovsdb_idl_add_column(idl, &ovsrec_interface_col_hw_bond_config);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_forwarding_state);
 
     ovsdb_idl_add_table(idl, &ovsrec_table_vlan);
     ovsdb_idl_add_column(idl, &ovsrec_vlan_col_name);
@@ -918,6 +922,9 @@ portd_init(const char *remote)
     if(retval < 0) {
         VLOG_ERR("Event log initialization failed for PORT");
     }
+
+    portd_arbiter_init();
+
 }
 
 static void
@@ -1760,6 +1767,7 @@ portd_handle_interface_config_mods(void)
                 VLOG_DBG("No port row for interface %s in ovsdb",
                          intf_row->name);
             }
+
             /*
              * Check if the user_config column changed.
              */
@@ -1792,7 +1800,7 @@ portd_handle_interface_config_mods(void)
                         port_admin = false;
                     }
                     /* The final state is the 'and operation' between
-                       the port admin and the interface admin */
+                     * the port admin and the interface admin */
                     port->hw_cfg_enable = (intf_admin && port_admin);
                     portd_set_hw_cfg(port, port_row);
                 }
@@ -3041,6 +3049,10 @@ portd_reconfigure(void)
         /* Close the init socket as it is not needed anymore */
         close(init_sock);
     }
+
+    /* Determine the new 'forwarding state' for each port */
+    portd_arbiter_run();
+
     /* After all changes are done, update the seqno. */
     idl_seqno = new_idl_seqno;
     return;
@@ -3463,6 +3475,29 @@ portd_register_event_log(struct ovsrec_port *port_row,
         }
      }
    }
+}
+
+void
+portd_arbiter_run(void)
+{
+    const struct ovsrec_port *port = NULL;
+    struct smap forwarding_state;
+
+    /* Walk through all the interfaces and update the forwarding states
+     * for each layer and the final forwarding state. */
+    OVSREC_PORT_FOR_EACH(port, idl) {
+        smap_clone(&forwarding_state, &port->forwarding_state);
+        /* Run the arbiter for the port */
+        portd_arbiter_port_run(port, &forwarding_state);
+        /* Check if the OVSDB column needs an update */
+        if (!smap_equal(&forwarding_state, &port->forwarding_state)) {
+            ovsrec_port_set_forwarding_state(port, &forwarding_state);
+            commit_txn = true;
+        }
+        smap_destroy(&forwarding_state);
+    }
+
+    return;
 }
 
 int
