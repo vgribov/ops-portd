@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Hewlett-Packard Development Company, L.P.
+ * Copyright (C) 2015-2016 Hewlett-Packard Development Company, L.P.
  * All Rights Reserved.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -44,6 +44,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <dynamic-string.h>
 
 /* OVSDB Includes */
 #include "config.h"
@@ -88,6 +89,7 @@ struct ovsdb_idl_txn *txn;
 bool commit_txn = false;
 
 static unixctl_cb_func portd_unixctl_dump;
+static unixctl_cb_func portd_unixctl_getbondingconfiguration;
 static int system_configured = false;
 
 /* This static boolean is used to configure VLANs
@@ -849,6 +851,8 @@ portd_init(const char *remote)
     INIT_DIAG_DUMP_BASIC(portd_diag_dump_basic_subif_lpbk);
     unixctl_command_register("portd/dump", "", 0, 0,
                              portd_unixctl_dump, NULL);
+    unixctl_command_register("portd/getbondingconfiguration", "", 0, 1,
+                             portd_unixctl_getbondingconfiguration, NULL);
     /*
      * Open a netlink socket for communication with the kernel
      */
@@ -2842,6 +2846,54 @@ portd_wait(void)
 }
 
 
+/**
+ * @details
+ * Dumps the Linux bonding driver configuration for all the LAGs in the system
+ * or for a specified LAG.
+ */
+void portd_bonding_configuration_dump(struct ds *ds, int argc, const char *argv[])
+{
+    struct shash_node *sh_node;
+    struct port_lag_data *portp = NULL;
+
+    if (argc > 1) { /* a lag is specified in argv */
+        portp = shash_find_data(&all_ports, argv[1]);
+        if (portp){
+            if (!strncmp(portp->name, LAG_NAME_SUFFIX, LAG_NAME_SUFFIX_LENGTH)) {
+                portd_bonding_configuration_file_dump(ds, portp->name);
+            }
+        }
+    } else { /* dump all lags */
+        SHASH_FOR_EACH(sh_node, &all_ports) {
+            portp = sh_node->data;
+            if (portp) {
+                if (!strncmp(portp->name, LAG_NAME_SUFFIX, LAG_NAME_SUFFIX_LENGTH)) {
+                    portd_bonding_configuration_file_dump(ds, portp->name);
+                }
+            }
+        }
+    }
+}
+
+/**
+ * ovs-appctl interface callback function to dump Linux bonding driver
+ * configuration file.
+ *
+ * @param conn connection to ovs-appctl interface.
+ * @param argc number of arguments.
+ * @param argv array of arguments.
+ * @param OVS_UNUSED aux argument not used.
+ */
+static void
+portd_unixctl_getbondingconfiguration(struct unixctl_conn *conn, int argc,
+                   const char *argv[], void *aux OVS_UNUSED)
+{
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    portd_bonding_configuration_dump(&ds, argc, argv);
+    unixctl_command_reply(conn, ds_cstr(&ds));
+    ds_destroy(&ds);
+}
+
 static void
 portd_unixctl_dump(struct unixctl_conn *conn, int argc OVS_UNUSED,
                    const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
@@ -2869,6 +2921,12 @@ portd_dump(char* buf, int buflen, const char* feature)
        sprintf(buf, "Number of Configured sub-interfaces are : %d.", subintf_count);
     else if (strcmp(feature, "loopback") == 0)
        sprintf(buf, "Number of Configured loopback interfaces are : %d.", lpbk_count);
+    /* Dump Linux bonding configuration for lacp feature. */
+    else if (strcmp(feature, "lacp") == 0) {
+        struct ds ds = DS_EMPTY_INITIALIZER;
+        portd_bonding_configuration_dump(&ds, 0, NULL);
+        sprintf(buf, "%s", ds_cstr(&ds));
+    }
 }
 
 static void

@@ -41,10 +41,12 @@
 VLOG_DEFINE_THIS_MODULE(linux_bond);
 
 #define MAX_FILE_PATH_LEN       100
+#define READ                    "r"
 #define WRITE_UPDATE            "w+"
 #define BONDING_MASTERS_PATH    "/sys/class/net/bonding_masters"
 #define BONDING_MODE_PATH       "/sys/class/net/%s/bonding/mode"
 #define BONDING_SLAVES_PATH     "/sys/class/net/%s/bonding/slaves"
+#define BONDING_CONFIGURATION   "/proc/net/bonding/%s"
 #define BALANCE_XOR_MODE        "2"
 
 /**
@@ -178,3 +180,34 @@ bool remove_slave_from_bond(char* bond_name, char* slave_name)
         return false;
     }
 } /* remove_slave_from_bond */
+
+/**
+ * Dumps the Linux bonding driver configuration for a specified bond.
+ *
+ * @param ds pointer to struct ds that holds the debug output.
+ * @param bond_name is the name of the bond.
+
+ * @return void
+ *
+ */
+void portd_bonding_configuration_file_dump(struct ds *ds, char* bond_name)
+{
+    ds_put_format(ds, "Configuration file for %s:\n", bond_name);
+    char file_path[MAX_FILE_PATH_LEN];
+    FILE * configuration_file;
+    int char_to_print;
+
+    sprintf(file_path, BONDING_CONFIGURATION, bond_name);
+    configuration_file = fopen (file_path, READ);
+
+    if(configuration_file) {
+        while ((char_to_print = getc(configuration_file)) != EOF)
+            ds_put_format(ds, "%c", char_to_print);
+        ds_put_format(ds, "\n");
+        fclose(configuration_file);
+    }
+    else {
+        VLOG_ERR("bond: Failed to dump configuration file from bond %s",
+                 bond_name);
+    }
+}

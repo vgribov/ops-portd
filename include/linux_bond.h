@@ -23,5 +23,6 @@ bool delete_linux_bond(char* bond_name);
 bool create_linux_bond(char* bond_name);
 bool add_slave_to_bond(char* bond_name, char* slave_name);
 bool remove_slave_from_bond(char* bond_name, char* slave_name);
+void portd_bonding_configuration_file_dump(struct ds *ds, char* lag_name);
 
 #endif /* _LINUX_BOND_H_ */
