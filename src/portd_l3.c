@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Hewlett-Packard Development Company, L.P.
+ * Copyright (C) 2015-2016 Hewlett-Packard Development Company, L.P.
  * All Rights Reserved.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -495,6 +495,7 @@ nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
     struct in_addr ipv4;
     struct in6_addr ipv6;
     unsigned char prefixlen, *ipaddr = NULL;
+    struct vrf *vrf = get_vrf_for_port(port_name);
 
     memset (&req, 0, sizeof(req));
 
@@ -505,7 +506,12 @@ nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
     req.n.nlmsg_type = cmd;
 
     req.ifa.ifa_family = family;
+    #ifdef VRF_ENABLE
+    req.ifa.ifa_index = portd_if_nametoindex(vrf, port_name);
+    #else
     req.ifa.ifa_index = if_nametoindex(port_name);
+    #endif
+
     if (req.ifa.ifa_index == 0) {
         VLOG_ERR("Unable to get ifindex for port '%s'", port_name);
         return;
@@ -543,7 +549,7 @@ nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
     memcpy(RTA_DATA(rta), ipaddr, bytelen);
     req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + RTA_ALIGN(buflen);
 
-    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+    if (send(NL_SOCK(vrf), &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to set IP address for '%s' (%s)",
                  ip_address, strerror(errno));
         return;
@@ -573,6 +579,7 @@ portd_add_vlan_interface(const char *interface_name,
                          const unsigned short vlan_tag)
 {
     int ifindex;
+    struct vrf *vrf = get_vrf_for_port(vlan_interface_name);
 
     struct {
         struct nlmsghdr  n;
@@ -589,7 +596,11 @@ portd_add_vlan_interface(const char *interface_name,
     req.n.nlmsg_flags   = NLM_F_REQUEST | NLM_F_CREATE;
 
     req.i.ifi_family    = AF_UNSPEC;
+    #ifdef VRF_ENABLE
+    ifindex             = portd_if_nametoindex(vrf, interface_name);
+    #else
     ifindex             = if_nametoindex(interface_name);
+    #endif
 
     if (ifindex == 0) {
         VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
@@ -612,7 +623,7 @@ portd_add_vlan_interface(const char *interface_name,
     add_link_attr(&req.n, sizeof(req), IFLA_IFNAME, vlan_interface_name,
                   strlen(vlan_interface_name)+1);
 
-    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+    if (send(NL_SOCK(vrf), &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to create vlan interface: %s (%s)",
                  vlan_interface_name, strerror(errno));
         return;
@@ -641,6 +652,8 @@ portd_del_vlan_interface(const char *vlan_interface_name)
         char buf[128];  /* must fit interface name length (IFNAMSIZ)*/
     } req;
 
+    struct vrf *vrf = get_vrf_for_port(vlan_interface_name);
+
     memset(&req, 0, sizeof(req));
 
     req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
@@ -649,14 +662,18 @@ portd_del_vlan_interface(const char *vlan_interface_name)
     req.n.nlmsg_flags   = NLM_F_REQUEST;
 
     req.i.ifi_family    = AF_UNSPEC;
+    #ifdef VRF_ENABLE
+    req.i.ifi_index     = portd_if_nametoindex(vrf, vlan_interface_name);
+    #else
     req.i.ifi_index     = if_nametoindex(vlan_interface_name);
+    #endif
 
     if (req.i.ifi_index == 0) {
         VLOG_ERR("Unable to get ifindex for interface: %s", vlan_interface_name);
         return;
     }
 
-    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+    if (send(NL_SOCK(vrf), &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to delete vlan interface: %s (%s)",
                  vlan_interface_name, strerror(errno));
         return;
@@ -736,7 +753,27 @@ const struct ovsrec_vrf* get_vrf_row_for_port(const char *port_name)
     }
   return row_vrf;
 }
+
 #endif
+struct vrf* get_vrf_for_port(const char *port_name)
+{
+
+#ifdef VRF_ENABLE
+  struct vrf *vrf = NULL;
+  struct port *port = NULL;
+
+  HMAP_FOR_EACH (vrf, node, &all_vrfs) {
+     HMAP_FOR_EACH (port, port_node,
+                             &vrf->ports) {
+        if (!strcmp(port->name, port_name)) {
+            return vrf;
+        }
+     }
+  }
+#endif
+  return NULL;
+}
+
 
 /*
  * Add a directly connected route to the DB. The NH is the port which

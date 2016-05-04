@@ -139,7 +139,7 @@ static void portd_vlan_intf_config_on_init(int intf_index,
                                            struct rtattr *link_info);
 static void portd_update_kernel_intf_up_down (char *intf_name);
 static void parse_nl_new_link_msg(struct nlmsghdr *h);
-static void portd_netlink_socket_open(int *sock, bool is_init_sock);
+static void portd_netlink_socket_open(const char* vrf_name, int *sock, bool is_init_sock);
 
 static void portd_init(const char *remote);
 static void portd_exit(void);
@@ -189,6 +189,10 @@ static void portd_vlan_config_on_init(void);
 /* VRF related functions */
 static void portd_vrf_del(struct vrf *vrf);
 static void portd_vrf_add(const struct ovsrec_vrf *vrf_row);
+#ifdef VRF_ENABLE
+static void
+portd_vrf_netlink_socket_open(struct vrf *vrf_in);
+#endif
 static void portd_add_del_vrf(void);
 
 static void portd_reconfigure(void);
@@ -709,9 +713,37 @@ parse_nl_new_link_msg(struct nlmsghdr *h)
  *                and perform reconfiguration on init.
  */
 static void
-portd_netlink_socket_open(int *sock, bool is_init_sock)
+portd_netlink_socket_open(const char *vrf_name, int *sock, bool is_init_sock)
 {
     struct sockaddr_nl s_addr;
+    char prev_ns[MAX_BUFFER_LENGTH] = {0};
+    char set_ns[MAX_BUFFER_LENGTH] = {0};
+    int fd_from_ns = -1;
+    int fd_to_ns = -1;
+
+    if (vrf_name && (strcmp(vrf_name , DEFAULT_VRF_NAME)) != 0)
+    {
+       /* non default vrf. We need to open socket by entering corresponding namespace
+          Open FD to set the thread to a namespace */
+        strcat(set_ns, "/var/run/netns/");
+        strcat(prev_ns, "/var/run/netns/");
+        strncat(prev_ns, SWITCH_NAMESPACE, strlen(SWITCH_NAMESPACE));
+        strncat(set_ns, vrf_name, strlen(vrf_name));
+        fd_to_ns = open(set_ns, O_RDONLY);
+        fd_from_ns = open(prev_ns, O_RDONLY);
+        if (fd_from_ns == -1 || fd_to_ns == -1) {
+            VLOG_ERR("Unable to open fd for namepsace %s line number %d %s",
+                      vrf_name,__LINE__, strerror(errno));
+            goto label;
+            return;
+        }
+        if (setns(fd_to_ns, 0) == -1) {
+            VLOG_ERR("Unable to set %s namespace to the thread %d %s",
+                      vrf_name, __LINE__, strerror(errno));
+           goto label;
+            return;
+        }
+    }
 
     *sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
 
@@ -719,6 +751,7 @@ portd_netlink_socket_open(int *sock, bool is_init_sock)
         VLOG_ERR("Netlink socket creation failed (%s)",strerror(errno));
         log_event("PORT_SOCKET_CREATION_FAIL",
             EV_KV("error", "%s", strerror(errno)));
+        goto label;
         return;
     }
 
@@ -729,10 +762,26 @@ portd_netlink_socket_open(int *sock, bool is_init_sock)
         s_addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR | RTMGRP_LINK;
     }
     if (bind(*sock, (struct sockaddr *) &s_addr, sizeof(s_addr)) < 0) {
-        VLOG_ERR("Netlink socket bind failed (%s)",strerror(errno));
-        log_event("PORT_SOCKET_BIND_FAIL",
-            EV_KV("error", "%s", strerror(errno)));
-        return;
+       if (errno != EADDRINUSE) {
+           VLOG_ERR("Netlink socket bind failed (%s)",strerror(errno));
+            log_event("PORT_SOCKET_BIND_FAIL",
+                          EV_KV("error", "%s", strerror(errno)));
+           goto label;
+           return;
+       }
+    }
+
+label:
+     if (fd_from_ns != -1)
+    {
+        if (setns(fd_from_ns, 0) == -1) {
+            VLOG_ERR("Unable to set %s namespace to the thread %d", SWITCH_NAMESPACE, __LINE__);
+            close(fd_from_ns);
+            close(fd_to_ns);
+            return;
+        }
+        close(fd_to_ns);
+        close(fd_from_ns);
     }
 
     VLOG_DBG("Netlink socket created. fd = %d",*sock);
@@ -768,7 +817,9 @@ portd_init(const char *remote)
     ovsdb_idl_add_table(idl, &ovsrec_table_vrf);
     ovsdb_idl_add_column(idl, &ovsrec_vrf_col_name);
     ovsdb_idl_add_column(idl, &ovsrec_vrf_col_ports);
-
+#ifdef VRF_ENABLE
+    ovsdb_idl_add_column(idl, &ovsrec_vrf_col_status);
+#endif
     ovsdb_idl_add_table(idl, &ovsrec_table_bridge);
     ovsdb_idl_add_column(idl, &ovsrec_bridge_col_name);
     ovsdb_idl_add_column(idl, &ovsrec_bridge_col_vlans);
@@ -856,7 +907,7 @@ portd_init(const char *remote)
     /*
      * Open a netlink socket for communication with the kernel
      */
-    portd_netlink_socket_open(&nl_sock, false);
+    portd_netlink_socket_open(DEFAULT_VRF_NAME, &nl_sock, false);
 
     /* By default, we disable routing at the start.
      * Enabling will be done as part of reconfigure. */
@@ -935,7 +986,60 @@ portd_set_hw_cfg(struct port *port, const struct ovsrec_port *port_row)
     smap_destroy(&hw_cfg_smap);
     commit_txn = true;
 }
+#ifdef VRF_ENABLE
+unsigned int portd_if_nametoindex(struct vrf *vrf, const char *name) {
+    int status;
+    unsigned int ifindex = 0;
+    int pipe_fd[2];
 
+    pipe(pipe_fd);
+    int pid = fork();
+
+    if (pid) { /*Parent Process waits child to exit*/
+           close(pipe_fd[1]); /*read only. close write*/
+           wait(&status);
+           read(pipe_fd[0], &ifindex, sizeof(ifindex));
+           VLOG_DBG("ifindex is :%d line number-%d ", ifindex, __LINE__);
+           close(pipe_fd[0]);
+           return ifindex;
+    } else {
+           int fd_to_ns = -1;
+           char set_ns[MAX_BUFFER_LENGTH] = {0};
+            close(pipe_fd[0]); /*write only. close read*/
+
+           if (vrf && strcmp(vrf->name, DEFAULT_VRF_NAME) != 0)
+           {
+                    char buff[UUID_LEN] = {0};
+                   /* non default vrf. We need to open socket by entering corresponding
+                      namespace Open FD to set the thread to a namespace */
+                   strcat(set_ns, "/var/run/netns/");
+                   sprintf(buff, UUID_FMT, UUID_ARGS(&(vrf->cfg->header_.uuid)));
+                   strncat(set_ns, buff, strlen(buff));
+                   fd_to_ns = open(set_ns, O_RDONLY);
+                   if (fd_to_ns == -1) {
+                           VLOG_ERR("Unable to open fd for namepsace %s line %d ",
+                                   vrf->name, __LINE__);
+                            _exit(EXIT_SUCCESS);
+                           return 0;
+                   }
+                   if (setns(fd_to_ns, 0) == -1) {
+                           VLOG_ERR("Unable to set %s namespace to the thread %d %s",
+                                    vrf->name, __LINE__, strerror(errno));
+                           close(fd_to_ns);
+                            _exit(EXIT_SUCCESS);
+                           return 0;
+                   }
+           }
+           ifindex = if_nametoindex(name);
+           write(pipe_fd[1], &ifindex, sizeof(ifindex));
+           if (fd_to_ns != -1)
+               close(fd_to_ns);
+           close(pipe_fd[1]);
+           _exit(EXIT_SUCCESS);
+    }
+    return EXIT_SUCCESS;
+  }
+#endif
 /*
  * Function: portd_set_interface_mtu
  * Param:
@@ -950,6 +1054,7 @@ portd_set_interface_mtu(const char *interface_name, unsigned int mtu)
 {
     struct rtattr *rta;
     struct rtareq req;
+    struct vrf *vrf = get_vrf_for_port(interface_name);
 
     if (interface_name == NULL ||
             strcmp(interface_name, PORTD_EMPTY_STRING) == 0) {
@@ -964,8 +1069,11 @@ portd_set_interface_mtu(const char *interface_name, unsigned int mtu)
     req.n.nlmsg_flags   = NLM_F_REQUEST;
 
     req.i.ifi_family    = AF_UNSPEC;
+    #ifdef VRF_ENABLE
+    req.i.ifi_index     = portd_if_nametoindex(vrf, interface_name);
+    #else
     req.i.ifi_index     = if_nametoindex(interface_name);
-
+    #endif
     if (req.i.ifi_index == 0) {
         VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
         return;
@@ -978,7 +1086,7 @@ portd_set_interface_mtu(const char *interface_name, unsigned int mtu)
     req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + RTA_LENGTH(sizeof(mtu));
     memcpy(RTA_DATA(rta), &mtu, sizeof(mtu));
 
-    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+    if (send(NL_SOCK(vrf), &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to set mtu %d for interface %s", mtu,
                  interface_name);
         log_event("PORT_MTU_FAIL", EV_KV("mtu", "%d", mtu),
@@ -1002,6 +1110,7 @@ static void
 portd_interface_up_down(const char *interface_name, const char *status)
 {
     struct rtareq req;
+    struct vrf *vrf = get_vrf_for_port(interface_name);
 
     if (status == NULL || strcmp(status, PORTD_EMPTY_STRING) == 0) {
         VLOG_ERR("Invalid status argument");
@@ -1022,7 +1131,11 @@ portd_interface_up_down(const char *interface_name, const char *status)
     req.n.nlmsg_flags   = NLM_F_REQUEST;
 
     req.i.ifi_family    = AF_UNSPEC;
+    #ifdef VRF_ENABLE
+    req.i.ifi_index     = portd_if_nametoindex(vrf, interface_name);
+    #else
     req.i.ifi_index     = if_nametoindex(interface_name);
+    #endif
 
     if (req.i.ifi_index == 0) {
         VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
@@ -1038,7 +1151,7 @@ portd_interface_up_down(const char *interface_name, const char *status)
         req.i.ifi_flags  &= ~IFF_UP;
     }
 
-    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+    if (send(NL_SOCK(vrf), &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to bring %s the interface %s", status,
                  interface_name);
         log_event("PORT_INTERFACE_FAIL", EV_KV("status", "%s", status),
@@ -1083,6 +1196,7 @@ portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
     unsigned short vlan_tag = 0;
     const struct ovsrec_interface *intf_row = NULL,  *parent_intf_row = NULL;
     memset(&req, 0, sizeof(req));
+    struct vrf *vrf = get_vrf_for_port(port_row->name);
 
     intf_row = portd_get_matching_interface_row(port_row);
     if (NULL == intf_row) {
@@ -1140,10 +1254,15 @@ portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
         req.n.nlmsg_flags   = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
 
         req.i.ifi_family    = AF_UNSPEC;
+        #ifdef VRF_ENABLE
+        ifindex             = portd_if_nametoindex(vrf, parent_intf_row->name);
+        #else
         ifindex             = if_nametoindex(parent_intf_row->name);
+        #endif
+
         if (ifindex == 0) {
-            VLOG_ERR("Unable to get ifindex for interface: %s",
-                   parent_intf_row->name);
+            VLOG_ERR("Unable to get ifindex for interface: %s line number %d",
+                   parent_intf_row->name,__LINE__);
             return false;
         }
 
@@ -1164,7 +1283,7 @@ portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
         add_link_attr(&req.n, sizeof(req), IFLA_IFNAME, port_row->name,
                 strlen(port_row->name)+1);
 
-        if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        if (send(NL_SOCK(vrf), &req, req.n.nlmsg_len, 0) == -1) {
             VLOG_ERR("Netlink failed to create sub interface: %s (%s)",
                     port_row->name, strerror(errno));
             return false;
@@ -1318,6 +1437,7 @@ portd_del_subinterface(const char *sub_interface_name)
         struct ifinfomsg i;
         char             buf[128];
     } req;
+    struct vrf *vrf = get_vrf_for_port(sub_interface_name);
 
     memset(&req, 0, sizeof(req));
 
@@ -1327,7 +1447,11 @@ portd_del_subinterface(const char *sub_interface_name)
     req.n.nlmsg_flags   = NLM_F_REQUEST;
 
     req.i.ifi_family    = AF_UNSPEC;
+    #ifdef VRF_ENABLE
+    req.i.ifi_index     = portd_if_nametoindex(vrf, sub_interface_name);
+    #else
     req.i.ifi_index     = if_nametoindex(sub_interface_name);
+    #endif
 
     if (req.i.ifi_index == 0) {
         VLOG_ERR("Unable to get ifindex for subinterface: %s",
@@ -1335,7 +1459,7 @@ portd_del_subinterface(const char *sub_interface_name)
         return;
     }
 
-    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+    if (send(NL_SOCK(vrf), &req, req.n.nlmsg_len, 0) == -1) {
         VLOG_ERR("Netlink failed to delete subinterface: %s (%s)",
                 sub_interface_name, strerror(errno));
         return;
@@ -1997,6 +2121,23 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
             portd_port_create(vrf, port_row);
             port = portd_port_lookup(vrf, port_row->name);
 
+#ifdef VRF_ENABLE
+            if (vrf->cfg && strcmp(vrf->name, DEFAULT_VRF_NAME) &&
+                            !strcmp(smap_get(&vrf->cfg->status, VRF_STATUS_KEY),
+                                    VRF_STATUS_VALUE)) {
+                portd_vrf_netlink_socket_open(vrf);
+                char buff[UUID_LEN] = {0};
+                struct setns_info setns_local_info;
+                sprintf(buff, UUID_FMT, UUID_ARGS(&(vrf->cfg->header_.uuid)));
+                memcpy(&setns_local_info.to_ns[0], buff,  strlen(buff) + 1);
+                memcpy(&setns_local_info.from_ns[0], SWITCH_NAMESPACE,  strlen(SWITCH_NAMESPACE) + 1);
+                memcpy(&setns_local_info.intf_name[0], port_row->name, strlen(port_row->name) + 1);
+                if (!nl_move_intf_to_vrf(&setns_local_info)) {
+                    VLOG_ERR("Failed to move interface from %s to %s",
+                              SWITCH_NAMESPACE, vrf->name);
+                 }
+            }
+#endif
             if (portd_interface_type_internal_check(port_row, port_row->name) &&
                 portd_port_in_bridge_check(port_row->name, DEFAULT_BRIDGE_NAME) &&
                 portd_port_in_vrf_check(port_row->name, DEFAULT_VRF_NAME)) {
@@ -2072,6 +2213,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                 portd_reconfig_ipaddr(port, port_row);
                 portd_register_event_log(port_row, port);
                 portd_port_admin_state_reconfigure(port, port_row);
+                portd_update_kernel_intf_up_down(port_row->name);
                 /* Port table row modified */
                 VLOG_DBG("Port modified IP: %s vrf %s\n", port_row->ip4_address,
                         vrf->name);
@@ -2130,7 +2272,11 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                             OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0)) {
                 char str[512] = {0};
                 portd_reconfigure_subinterface(port_row);
+                #ifdef VRF_ENABLE
+                if (portd_if_nametoindex(vrf, port_row->name))
+                #else
                 if (if_nametoindex(port_row->name))
+                #endif
                 {
                    if (port_row->ip4_address != NULL)
                    {
@@ -2226,7 +2372,24 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
 
             VLOG_DBG("Processing port delete port: %s type: %s",
                      port->name, port->type ? "inter-vlan" : "L3");
+#ifdef VRF_ENABLE
+            if (vrf->cfg && strcmp(vrf->name, DEFAULT_VRF_NAME) &&
+                          !strcmp(smap_get(&vrf->cfg->status, VRF_STATUS_KEY),
+                                  VRF_STATUS_VALUE)) {
 
+                char buff[UUID_LEN] = {0};
+                sprintf(buff, UUID_FMT, UUID_ARGS(&(vrf->cfg->header_.uuid)));
+                struct setns_info setns_local_info;
+                memcpy(&setns_local_info.from_ns[0], buff,  strlen(buff)+1);
+                memcpy(&setns_local_info.to_ns[0], SWITCH_NAMESPACE,  strlen(SWITCH_NAMESPACE)+1);
+                memcpy(&setns_local_info.intf_name[0], port->name,  strlen(port->name) + 1);
+                if (!nl_move_intf_to_vrf(&setns_local_info)) {
+                    VLOG_ERR("Failed to move interface from %s to %s",
+                               vrf->name, SWITCH_NAMESPACE);
+                }
+                portd_update_kernel_intf_up_down(port->name);
+            }
+#endif
             /* Send delete interface to kernel */
             if (port->type &&
                 (strcmp(port->type, OVSREC_INTERFACE_TYPE_INTERNAL) == 0)) {
@@ -2688,11 +2851,29 @@ portd_vrf_del(struct vrf *vrf)
         }
         hmap_remove(&all_vrfs, &vrf->node);
         hmap_destroy(&vrf->ports);
+        close(vrf->nl_sock);
         free(vrf->name);
         free(vrf);
     }
 }
+#ifdef VRF_ENABLE
+static void
+portd_vrf_netlink_socket_open(struct vrf *vrf_in)
+{
+     char buff[UUID_LEN] = {0};
 
+     if (vrf_in->nl_sock > 0)
+     {
+        return;
+     }
+        /* non default vrf. We need to open socket by entering corresponding
+          namespace Open FD to set the thread to a namespace */
+     sprintf(buff, UUID_FMT, UUID_ARGS(&(vrf_in->cfg->header_.uuid)));
+     portd_netlink_socket_open(buff, &vrf_in->nl_sock, false);
+
+     return;
+}
+#endif
 /* add vrf into cache */
 static void
 portd_vrf_add(const struct ovsrec_vrf *vrf_row)
@@ -2704,6 +2885,10 @@ portd_vrf_add(const struct ovsrec_vrf *vrf_row)
 
     vrf->name = xstrdup(vrf_row->name);
     vrf->cfg = vrf_row;
+    if (strcmp(vrf->name, DEFAULT_VRF_NAME) == 0)
+    {
+        vrf->nl_sock = nl_sock;
+    }
 
     hmap_init(&vrf->ports);
     hmap_insert(&all_vrfs, &vrf->node, hash_string(vrf->name, 0));
@@ -2773,7 +2958,7 @@ portd_reconfigure(void)
      */
     if (portd_config_on_init) {
         /* Open an init sock to process reconfiguration */
-        portd_netlink_socket_open(&init_sock, true);
+        portd_netlink_socket_open(DEFAULT_VRF_NAME, &init_sock, true);
         portd_vlan_config_on_init();
         portd_ipaddr_config_on_init();
         portd_intf_config_on_init();

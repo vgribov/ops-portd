@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Hewlett-Packard Development Company, L.P.
+ * Copyright (C) 2015-2016 Hewlett-Packard Development Company, L.P.
  * All Rights Reserved.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -27,6 +27,8 @@
 #include "shash.h"
 #include "vswitch-idl.h"
 #include "openswitch-idl.h"
+#include "vrf-utils.h"
+#include "nl-utils.h"
 
 #define PORTD_DISABLE_ROUTING 0
 #define PORTD_ENABLE_ROUTING 1
@@ -66,6 +68,17 @@
         ((strlen((s1)) == strlen((s2))) && \
         (!strncmp((s1), (s2), strlen((s2)))))
 
+#define NL_SOCK(vrf) \
+        vrf == NULL?nl_sock: vrf->nl_sock
+
+#define SWITCH_NAMESPACE "swns"
+
+#ifdef VRF_ENABLE
+#define VRF_STATUS_KEY "namespace_ready"
+#define VRF_STATUS_VALUE "true"
+#define MAX_BUFFER_LENGTH 256
+#endif
+
 /* Port configuration */
 struct port {
     struct hmap_node port_node; /* Element in struct vrf's "ports" hmap. */
@@ -93,6 +106,7 @@ struct vrf {
     struct hmap ports;          /* "struct port"s indexed by name. */
     /* Used during reconfiguration. */
     struct shash wanted_ports;
+    int nl_sock;
 };
 
 struct net_address {
@@ -122,12 +136,6 @@ struct kernel_port {
     struct hmap ip6addr; /*List of IPv6 addresses */
 };
 
-struct rtareq {
-    struct nlmsghdr  n;
-    struct ifinfomsg i;
-    char buf[128];      /* must fit interface name length (IFNAMSIZ)*/
-};
-
 struct ovsrec_port* portd_port_db_lookup(const char *);
 /* Helper functions to identify intervlan interfaces */
 bool portd_interface_type_internal_check(const struct ovsrec_port *port,
@@ -153,11 +161,13 @@ void portd_add_vlan_interface(const char *parent_intf_name,
                               const char *vlan_intf_name,
                               const unsigned short vlan_tag);
 void portd_del_vlan_interface(const char *vlan_intf_name);
-
+struct vrf* get_vrf_for_port(const char *port_name);
 /* Proxy ARP function */
 void portd_config_proxy_arp(struct port *port, char *str, int enable);
 
 /*Local proxy ARP function */
 void portd_config_local_proxy_arp(struct port *port, char *str, int enable);
+
+unsigned int portd_if_nametoindex(struct vrf *vrf, const char *name);
 
 #endif /* PORTD_H_ */
