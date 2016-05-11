@@ -73,7 +73,7 @@ static void portd_del_ipv4_addr(struct port *port);
 static void portd_del_ipv6_addr(struct port *port);
 static int add_link_attr(struct nlmsghdr *n, int nlmsg_maxlen,
                          int attr_type, const void *payload, int payload_len);
-static struct kernel_port* find_or_create_kernel_port(
+struct kernel_port* find_or_create_kernel_port(
         struct shash *kernel_port_list, const char *ifname);
 static bool portd_kernel_ip_addr_lookup(struct kernel_port *kernel_port,
                                         char *ip_address, bool ipv6);
@@ -1415,7 +1415,7 @@ add_link_attr(struct nlmsghdr *n, int nlmsg_maxlen,
  * This function is used to check and add a kernel interface to the
  * kernel port list which will be used later to compare with DB list.
  */
-static struct kernel_port *
+struct kernel_port *
 find_or_create_kernel_port(struct shash *kernel_port_list, const char *ifname)
 {
     struct kernel_port *port;

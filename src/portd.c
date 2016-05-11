@@ -78,8 +78,8 @@ COVERAGE_DEFINE(portd_reconfigure);
 #define BUF_LEN 16000
 #define MAX_ERR_STR_LEN 500
 
-int nl_sock; /* Netlink socket */
-int init_sock; /* This sock will only be used during init */
+int nl_sock = -1; /* Netlink socket */
+int init_sock = -1; /* This sock will only be used during init */
 
 /* IDL variables */
 unsigned int idl_seqno;
@@ -138,7 +138,7 @@ static inline void portd_chk_for_system_configured(void);
 static void portd_vlan_intf_config_on_init(int intf_index,
                                            struct rtattr *link_info);
 static void portd_update_kernel_intf_up_down (char *intf_name);
-static void parse_nl_new_link_msg(struct nlmsghdr *h);
+static void parse_nl_new_link_msg(struct nlmsghdr *h, struct shash *kernel_port_list);
 static void portd_netlink_socket_open(const char* vrf_name, int *sock, bool is_init_sock);
 
 static void portd_init(const char *remote);
@@ -183,8 +183,11 @@ static void portd_del_ports(struct vrf *vrf,
 static void portd_add_del_ports(void);
 
 /* Init functions */
-static void portd_intf_config_on_init (void);
+static void portd_intf_config_on_init (struct shash *kernel_port_list);
 static void portd_vlan_config_on_init(void);
+static int portd_kernel_if_sync_check_on_init (void);
+extern struct kernel_port* find_or_create_kernel_port(
+        struct shash *kernel_port_list, const char *ifname);
 
 /* VRF related functions */
 static void portd_vrf_del(struct vrf *vrf);
@@ -501,7 +504,7 @@ nl_msg_process(void *user_data, int sock, bool on_init)
                 }
                 break;
             case RTM_NEWLINK:
-                parse_nl_new_link_msg(nlh);
+                parse_nl_new_link_msg(nlh, user_data);
                 break;
 
             case NLMSG_DONE:
@@ -675,7 +678,7 @@ portd_update_kernel_intf_up_down(char *intf_name)
  * state from the DB and update the kernel accordingly.
  */
 static void
-parse_nl_new_link_msg(struct nlmsghdr *h)
+parse_nl_new_link_msg(struct nlmsghdr *h, struct shash *kernel_port_list)
 {
     struct ifinfomsg *iface;
     struct rtattr *attribute;
@@ -690,6 +693,14 @@ parse_nl_new_link_msg(struct nlmsghdr *h)
         case IFLA_IFNAME:
             VLOG_DBG("New interface %d : %s\n",
                      iface->ifi_index, (char *) RTA_DATA(attribute));
+
+            if (portd_config_on_init && kernel_port_list) {
+                struct kernel_port *port;
+
+                port = find_or_create_kernel_port (kernel_port_list, (char *)RTA_DATA(attribute));
+                shash_add_once(kernel_port_list, (char *)RTA_DATA(attribute), port);
+            }
+
             portd_update_kernel_intf_up_down((char *)RTA_DATA(attribute));
             break;
         case IFLA_LINKINFO:
@@ -746,7 +757,10 @@ portd_netlink_socket_open(const char *vrf_name, int *sock, bool is_init_sock)
         }
     }
 
-    *sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+     if (*sock < 0)
+         *sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+     else
+         return;
 
     if (*sock < 0) {
         VLOG_ERR("Netlink socket creation failed (%s)",strerror(errno));
@@ -931,6 +945,7 @@ static void
 portd_exit(void)
 {
     close(nl_sock);
+    nl_sock = -1;
     ovsdb_idl_destroy(idl);
 }
 
@@ -2831,7 +2846,7 @@ portd_add_del_ports(void)
  * state in sync with the OVSDB
  */
 static void
-portd_intf_config_on_init(void)
+portd_intf_config_on_init (struct shash *kernel_port_list)
 {
     struct rtattr *rta;
     struct {
@@ -2857,7 +2872,38 @@ portd_intf_config_on_init(void)
     /* Process the response from kernel */
     VLOG_DBG("Interfaces dump request sent on init");
 
-    nl_msg_process(NULL, init_sock, true);
+    nl_msg_process(kernel_port_list, init_sock, true);
+}
+
+/* This function checks if the kernel has all the interfaces already
+ * created in sync with the db.
+ * This is function is created on init.
+ * return : number of interfaces yet to be created in the kernel
+ */
+static int
+portd_kernel_if_sync_check_on_init (void)
+{
+    struct shash kernel_port_list;
+    const struct ovsrec_interface *intf_row;
+    unsigned int wait_for_kernel_if_sync;
+
+    shash_init (&kernel_port_list);
+
+    portd_intf_config_on_init (&kernel_port_list);
+
+    wait_for_kernel_if_sync = 0;
+
+    OVSREC_INTERFACE_FOR_EACH (intf_row, idl) {
+        if (!(strncmp(intf_row->type, OVSREC_INTERFACE_TYPE_SYSTEM,
+                     strlen(OVSREC_INTERFACE_TYPE_SYSTEM))) &&
+            !shash_find_data(&kernel_port_list, intf_row->name)) {
+            wait_for_kernel_if_sync++;
+        }
+    }
+
+    VLOG_DBG ("%u interfaces are yet be created in the kernel", wait_for_kernel_if_sync);
+
+    return wait_for_kernel_if_sync;
 }
 
 /**
@@ -2951,9 +2997,11 @@ portd_vrf_add(const struct ovsrec_vrf *vrf_row)
 
     vrf->name = xstrdup(vrf_row->name);
     vrf->cfg = vrf_row;
-    if (strcmp(vrf->name, DEFAULT_VRF_NAME) == 0)
-    {
+    if (strcmp(vrf->name, DEFAULT_VRF_NAME) == 0) {
         vrf->nl_sock = nl_sock;
+    }
+    else {
+        vrf->nl_sock = -1;
     }
 
     hmap_init(&vrf->ports);
@@ -3025,9 +3073,13 @@ portd_reconfigure(void)
     if (portd_config_on_init) {
         /* Open an init sock to process reconfiguration */
         portd_netlink_socket_open(DEFAULT_VRF_NAME, &init_sock, true);
+        if (portd_kernel_if_sync_check_on_init()) {
+            VLOG_DBG ("kernel if NOT in sync - returning!!");
+            return;
+        }
         portd_vlan_config_on_init();
+        portd_intf_config_on_init(NULL);
         portd_ipaddr_config_on_init();
-        portd_intf_config_on_init();
     }
 
     update_interface_cache();
@@ -3046,8 +3098,10 @@ portd_reconfigure(void)
 
     if (portd_config_on_init) {
         portd_config_on_init = false;
+        VLOG_DBG ("restting portd_config_on_init to 0");
         /* Close the init socket as it is not needed anymore */
         close(init_sock);
+        init_sock = -1;
     }
 
     /* Determine the new 'forwarding state' for each port */
