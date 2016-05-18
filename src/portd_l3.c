@@ -137,6 +137,7 @@ portd_config_iprouting(int enable)
     char buf[16];
     const char *ipv4_path = "/proc/sys/net/ipv4/ip_forward";
     const char *ipv6_path = "/proc/sys/net/ipv6/conf/all/forwarding";
+    const char *icmp_bcast = "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts";
 
     nbytes = sprintf(buf, "%d", enable);
     if ((fd = open(ipv4_path, O_WRONLY)) == -1) {
@@ -162,6 +163,22 @@ portd_config_iprouting(int enable)
     }
     close(fd);
     VLOG_DBG("%s ipv6 forwarding", (enable == 1 ? "Enabled" : "Disabled"));
+
+    /* By default value in this file is set to 1,
+     * Changing value to zero to allow broadcast ping
+     * when routing is enabled.
+     */
+    nbytes = sprintf(buf, "%d", !enable);
+    if ((fd = open(icmp_bcast, O_WRONLY)) == -1) {
+        VLOG_ERR("Unable to open %s (%s)", icmp_bcast, strerror(errno));
+        return;
+    }
+    if (write(fd, buf, nbytes) == -1) {
+        VLOG_ERR("Unable to write to %s (%s)", icmp_bcast, strerror(errno));
+        close(fd);
+        return;
+    }
+    close(fd);
 }
 
 /* Take care of add/delete/modify of v4/v6 address from db */
