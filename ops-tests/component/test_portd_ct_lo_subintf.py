@@ -24,6 +24,7 @@ is tested for loopback interface information.
 
 from __future__ import unicode_literals, absolute_import
 from __future__ import print_function, division
+from pytest import mark
 
 
 TOPOLOGY = """
@@ -387,6 +388,8 @@ def show_tech_loopback(dut, step):
                            "removed from show tech basic"
 
 
+@mark.skipif(True, reason="skipping test case due to new changes in show"
+             " events")
 def test_portd_events(topology, step):
     """
     Test case to verify the event logs in "show events" command
