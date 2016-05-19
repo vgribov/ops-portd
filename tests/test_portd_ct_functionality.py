@@ -31,6 +31,32 @@ intf3 = 3
 intf4 = 4
 
 
+def execute_command_and_verify_response(switch, command, max_try=1,
+                                        wait_time=1, **verify_strs):
+    for i in range(max_try):
+        returnStructure = switch.DeviceInteract(command=command)
+        bufferout = returnStructure.get('buffer')
+        passed = True
+        if verify_strs is not None:
+            for key, value in verify_strs.iteritems():
+                if value not in bufferout:
+                    passed = False
+                    break
+        if passed is True:
+            break
+        else:
+            sleep(wait_time)
+    if passed is True:
+        if i > 0:
+            LogOutput('debug', "Passed verify string after "
+                      + str(i) + " retries.")
+    else:
+        LogOutput('info', "Failed verify string after "
+                  + str(max_try) + " retries.\nBuffer:\n" + bufferout)
+
+    return passed
+
+
     # Test Case 1:
     # Test case checks ascending internal VLAN range to ensure VLANs are
     # allocated in ascending order.
@@ -501,6 +527,12 @@ def portd_functionality_tc6(**kwargs):
         " after 'no shut'###"
     )
     command = "ip netns exec swns ip addr show 3"
+    execute_command_and_verify_response(
+        switch=switch,
+        command=command,
+        max_try=20,
+        str1="inet",
+        str2="inet6")
     returnStructure = switch.DeviceInteract(command=command)
     bufferout = returnStructure.get('buffer')
     out = bufferout.split()
@@ -519,6 +551,11 @@ def portd_functionality_tc6(**kwargs):
     assert retCode == 0, "Cannot bring down interface %d" % intf3
     LogOutput('info', "### Verifying interface 3 'down' in the kernel ###")
     command = "ip netns exec swns ifconfig 3"
+    execute_command_and_verify_response(
+        switch=switch,
+        command=command,
+        max_try=10,
+        str1="BROADCAST")
     returnStructure = switch.DeviceInteract(command=command)
     bufferout = returnStructure.get('buffer')
     out = bufferout.split()
@@ -548,6 +585,12 @@ def portd_functionality_tc6(**kwargs):
         "### Re-verifying interface 3 ipv4 and ipv6 addresses in the kernel" +
         " after 'no shut'###")
     command = "ip netns exec swns ip addr show 3"
+    execute_command_and_verify_response(
+        switch=switch,
+        command=command,
+        max_try=10,
+        str1="inet",
+        str2="inet6")
     returnStructure = switch.DeviceInteract(command=command)
     bufferout = returnStructure.get('buffer')
     out = bufferout.split()
