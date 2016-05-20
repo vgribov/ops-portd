@@ -2295,7 +2295,12 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
     SHASH_FOR_EACH (port_node, wanted_ports) {
         struct ovsrec_port *port_row = port_node->data;
         struct port *port = portd_port_lookup(vrf, port_row->name);
-        if (port)
+        struct ovsrec_interface *intf_row = NULL;
+        intf_row = portd_get_matching_interface_row(port_row);
+
+        if ((port) &&
+           ((OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) ||
+           (OVSREC_IDL_IS_ROW_MODIFIED(intf_row, idl_seqno))))
         {
             if((NULL != port->type) &&
                     (strcmp(port->type,
