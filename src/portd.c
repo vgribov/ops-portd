@@ -3155,7 +3155,7 @@ portd_unixctl_dump(struct unixctl_conn *conn, int argc OVS_UNUSED,
 static void
 portd_dump(char* buf, int buflen, const char* feature)
 {
-    if (strcmp(feature, "sub-interface") == 0)
+    if (strcmp(feature, "subinterface") == 0)
        sprintf(buf, "Number of Configured sub-interfaces are : %d.", subintf_count);
     else if (strcmp(feature, "loopback") == 0)
        sprintf(buf, "Number of Configured loopback interfaces are : %d.", lpbk_count);
