@@ -176,7 +176,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
             if (strcmp(port->ip4_address, port_row->ip4_address) != 0) {
                 portd_set_ipaddr(RTM_DELADDR, port->name, port->ip4_address,
                                  AF_INET, false);
-                free(port->ip4_address);
+                SAFE_FREE(port->ip4_address);
 
                 port->ip4_address = xstrdup(port_row->ip4_address);
                 portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip4_address,
@@ -191,7 +191,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
         if (port->ip4_address != NULL) {
             portd_set_ipaddr(RTM_DELADDR, port->name, port->ip4_address,
                              AF_INET, false);
-            free(port->ip4_address);
+            SAFE_FREE(port->ip4_address);
             port->ip4_address = NULL;
         }
     }
@@ -201,7 +201,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
             if (strcmp(port->ip6_address, port_row->ip6_address) !=0) {
                 portd_set_ipaddr(RTM_DELADDR, port->name, port->ip6_address,
                                  AF_INET6, false);
-                free(port->ip6_address);
+                SAFE_FREE(port->ip6_address);
 
                 port->ip6_address = xstrdup(port_row->ip6_address);
                 portd_set_ipaddr(RTM_NEWADDR, port->name, port->ip6_address,
@@ -216,7 +216,7 @@ portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)
         if (port->ip6_address != NULL) {
             portd_set_ipaddr(RTM_DELADDR, port->name, port->ip6_address,
                              AF_INET6, false);
-            free(port->ip6_address);
+            SAFE_FREE(port->ip6_address);
             port->ip6_address = NULL;
         }
     }
@@ -468,8 +468,8 @@ portd_ipaddr_config_on_init(void)
          /* Free kernel port */
         hmap_destroy(&kernel_port->ip4addr);
         hmap_destroy(&kernel_port->ip6addr);
-        free(kernel_port->name);
-        free(kernel_port);
+        SAFE_FREE(kernel_port->name);
+        SAFE_FREE(kernel_port);
         kernel_port = NULL;
     }
     shash_destroy(&kernel_port_list);
@@ -1054,7 +1054,7 @@ portd_get_prefix(int family, char *ip_address, void *prefix,
      */
     if (*prefixlen > maxlen) {
         VLOG_DBG("Bad prefixlen %d > %d", *prefixlen, maxlen);
-        free(ip_address_copy);
+        SAFE_FREE(ip_address_copy);
         return -1;
     }
 
@@ -1064,7 +1064,7 @@ portd_get_prefix(int family, char *ip_address, void *prefix,
      */
     if (inet_pton(family, ip_address_copy, prefix) == 0) {
         VLOG_DBG("%d inet_pton failed with %s", family, strerror(errno));
-        free(ip_address_copy);
+        SAFE_FREE(ip_address_copy);
         return -1;
     }
 
@@ -1073,7 +1073,7 @@ portd_get_prefix(int family, char *ip_address, void *prefix,
      * free the memory in 'ip_address_copy'
      * and return 0.
      */
-    free(ip_address_copy);
+    SAFE_FREE(ip_address_copy);
     return 0;
 }
 
@@ -1243,8 +1243,8 @@ portd_config_secondary_ipv6_addr(struct port *port,
             hmap_remove(&port->secondary_ip6addr, &addr->addr_node);
             portd_set_ipaddr(RTM_DELADDR, port->name, addr->address,
                              AF_INET6, true);
-            free(addr->address);
-            free(addr);
+            SAFE_FREE(addr->address);
+            SAFE_FREE(addr);
         }
     }
 
@@ -1302,8 +1302,8 @@ portd_config_secondary_ipv4_addr(struct port *port,
             hmap_remove(&port->secondary_ip4addr, &addr->addr_node);
             portd_set_ipaddr(RTM_DELADDR, port->name, addr->address,
                              AF_INET, true);
-            free(addr->address);
-            free(addr);
+            SAFE_FREE(addr->address);
+            SAFE_FREE(addr);
         }
     }
 

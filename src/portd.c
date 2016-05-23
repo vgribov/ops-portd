@@ -1596,8 +1596,8 @@ portd_del_old_interface(struct shash_node *sh_node)
 {
     if (sh_node) {
         struct iface_data *idp = sh_node->data;
-        free(idp->name);
-        free(idp);
+        SAFE_FREE(idp->name);
+        SAFE_FREE(idp);
         shash_delete(&all_interfaces, sh_node);
     }
 } /* portd_del_old_interface */
@@ -1622,7 +1622,7 @@ portd_add_new_interface(const struct ovsrec_interface *ifrow)
 
     if (!shash_add_once(&all_interfaces, ifrow->name, idp)) {
         VLOG_WARN("Interface %s specified twice", ifrow->name);
-        free(idp);
+        SAFE_FREE(idp);
     } else {
        /* Save the interface name. */
        idp->name = xstrdup(ifrow->name);
@@ -1871,7 +1871,7 @@ portd_bridge_del_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
     }
     ovsrec_bridge_set_vlans(br, vlans, n);
     commit_txn = true;
-    free(vlans);
+    SAFE_FREE(vlans);
 }
 
 /**
@@ -2009,7 +2009,7 @@ portd_alloc_internal_vlan(void)
                     break;
                 }
             }
-            free(vlans_bmp);
+            SAFE_FREE(vlans_bmp);
         }
     }
     return vlan_allocated;
@@ -2029,7 +2029,7 @@ portd_bridge_insert_vlan(struct ovsrec_bridge *br, struct ovsrec_vlan *vlan)
     vlans[br->n_vlans] = vlan;
     ovsrec_bridge_set_vlans(br, vlans, br->n_vlans + 1);
     commit_txn = true;
-    free(vlans);
+    SAFE_FREE(vlans);
 }
 
 /* create a new internal vlan row to be inserted into db */
@@ -2370,28 +2370,28 @@ portd_port_destroy(struct port *port)
 
         VLOG_DBG("port '%s' destroy", port->name);
         if (port->ip4_address) {
-            free(port->ip4_address);
+            SAFE_FREE(port->ip4_address);
         }
         if (port->ip6_address) {
-            free(port->ip6_address);
+            SAFE_FREE(port->ip6_address);
         }
 
         HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node,
                             &port->secondary_ip4addr) {
-            free(addr->address);
-            free(addr);
+            SAFE_FREE(addr->address);
+            SAFE_FREE(addr);
         }
         hmap_destroy(&port->secondary_ip4addr);
 
         HMAP_FOR_EACH_SAFE (addr, next_addr, addr_node,
                             &port->secondary_ip6addr) {
-            free(addr->address);
-            free(addr);
+            SAFE_FREE(addr->address);
+            SAFE_FREE(addr);
         }
         hmap_destroy(&port->secondary_ip6addr);
         hmap_remove(&vrf->ports, &port->port_node);
-        free(port->name);
-        free(port);
+        SAFE_FREE(port->name);
+        SAFE_FREE(port);
     }
 }
 
@@ -2470,8 +2470,14 @@ portd_del_old_port(struct shash_node *sh_node)
     if (sh_node) {
         struct port_lag_data *portp = sh_node->data;
         struct shash_node *node, *next;
-
+        if (!portp)
+        {
+            VLOG_ERR ("No port data found for %s",sh_node->name);
+            return;
+        }
         SHASH_FOR_EACH_SAFE(node, next, &portp->eligible_member_ifs) {
+            /* Since we have got the shash_node. Why do we do find again
+               node->data won't have same idp? */
             struct iface_data *idp =
                 shash_find_data(&all_interfaces, node->name);
             if (idp) {
@@ -2482,8 +2488,23 @@ portd_del_old_port(struct shash_node *sh_node)
                 idp->port_datap = NULL;
             }
         }
-        free(portp->name);
-        free(portp);
+        /* When the eligible_member_ifs is NULL, say for parent interface,
+           there will be case where the idp->port_datap pointing to a location
+           which is freed and the location may not necessarily be empty.
+           So we need to NULLify the idp->port_datap for all those interface
+           data which had the deleted port */
+        SHASH_FOR_EACH_SAFE(node, next, &all_interfaces)
+        {
+            struct iface_data *idp = node->data;
+            if (idp && idp->port_datap &&
+               (idp->port_datap == portp))
+            {
+                VLOG_INFO ("IDP PORT DATA NULLIFIED FOR : %s",idp->name);
+                idp->port_datap = NULL;
+            }
+        }
+        SAFE_FREE(portp->name);
+        SAFE_FREE(portp);
         shash_delete(&all_ports, sh_node);
     }
 } /* portd_del_old_port */
@@ -2504,7 +2525,7 @@ portd_add_new_port(const struct ovsrec_port *port_row)
 
     if (!shash_add_once(&all_ports, port_row->name, portp)) {
         VLOG_WARN("Port %s specified twice", port_row->name);
-        free(portp);
+        SAFE_FREE(portp);
     } else {
         portp->cfg = port_row;
         portp->name = xstrdup(port_row->name);
@@ -2731,6 +2752,8 @@ portd_add_del_ports(void)
 
     /* Delete old ports. */
     SHASH_FOR_EACH_SAFE(sh_node, sh_next, &all_ports) {
+        /* Even though it will not effect anything but the below find
+           will return ovsrec_port row not port_lag_data */
         struct port_lag_data *portp = shash_find_data(&sh_idl_ports, sh_node->name);
         if (!portp) {
             VLOG_DBG("bond:Found a deleted port %s", sh_node->name);
@@ -2887,8 +2910,8 @@ portd_vrf_del(struct vrf *vrf)
         hmap_remove(&all_vrfs, &vrf->node);
         hmap_destroy(&vrf->ports);
         close(vrf->nl_sock);
-        free(vrf->name);
-        free(vrf);
+        SAFE_FREE(vrf->name);
+        SAFE_FREE(vrf);
     }
 }
 #ifdef VRF_ENABLE
@@ -3148,7 +3171,7 @@ portd_unixctl_dump(struct unixctl_conn *conn, int argc OVS_UNUSED,
                unixctl_command_reply(conn, buf);
                portd_dump(buf, BUF_LEN, "loopback");
                unixctl_command_reply(conn, buf);
-               free(buf);
+               SAFE_FREE(buf);
        } else {
                snprintf(err_str,sizeof(err_str),
                                "portd daemon failed to allocate %d bytes", BUF_LEN );

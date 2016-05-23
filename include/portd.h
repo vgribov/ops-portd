@@ -80,6 +80,9 @@
 #define MAX_BUFFER_LENGTH 256
 #endif
 
+#define SAFE_FREE(x) \
+        if (x) {free(x);x = NULL;};
+
 /* Port configuration */
 struct port {
     struct hmap_node port_node; /* Element in struct vrf's "ports" hmap. */
