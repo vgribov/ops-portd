@@ -18,6 +18,7 @@
 
 from re import search
 import pytest
+from time import sleep
 
 TOPOLOGY = """
 # +-------+
@@ -33,6 +34,29 @@ sw1:if02
 sw1:if03
 sw1:if04
 """
+
+def execute_command_and_verify_response(sw1, step, command, u_shell, max_try=1,
+                                        wait_time=1, **verify_strs):
+    for i in range(max_try):
+        output = sw1(command, shell=u_shell)
+        passed = True
+        if verify_strs is not None:
+            for key, value in verify_strs.items():
+                if value not in output:
+                    passed = False
+                    break
+        if passed is True:
+            break
+        else:
+            sleep(wait_time)
+    if passed is True:
+        if i > 0:
+           step ("Passed verify string after " + str(i) + " retries.")
+    else:
+        step ("Failed verify string after "
+                  + str(max_try) + " retries.\nOutput:\n" + output)
+
+    return passed
 
 
 # Test Case 1:
@@ -69,8 +93,24 @@ def portd_functionality_tc1(sw1, step):
     assert '400' in lines[indexval + 3] or '400' in lines[indexval + 4] and \
            '401' in lines[indexval + 3] or '401' in lines[indexval + 4]
     step("Verifying internal VLANs assigned to interfaces in the kernel")
+    command = "ip netns exec swns ip addr show 1"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'bash',
+        max_try=10,
+        str1="inet")
     output = sw1("ip netns exec swns ip addr show 1", shell='bash')
     assert 'inet 10.1.1.1/8' in output
+    command = "ip netns exec swns ip addr show 2"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'bash',
+        max_try=10,
+        str1="inet")
     output = sw1("ip netns exec swns ip addr show 2", shell='bash')
     assert 'inet 11.1.1.1/8' in output
 
@@ -86,9 +126,25 @@ def portd_functionality_tc2(sw1, step):
     sw1("ip address 12.1.1.1/8")
     sw1("exit")
     step("Verifying default internal VLAN assigned to interface 3 in the DB")
+    command = "get port 3 hw_config:internal_vlan_id"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'vsctl',
+        max_try=10,
+        str1="1024")
     output = sw1("get port 3 hw_config:internal_vlan_id", shell='vsctl')
     assert '"1024"' in output
     step("Verify default internal VLAN assigned to interface 3 in the kernel")
+    command = "ip netns exec swns ip addr show 3"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'bash',
+        max_try=10,
+        str1="inet")
     output = sw1("ip netns exec swns ip addr show 3", shell='bash')
     assert 'inet 12.1.1.1/8' in output
 
@@ -104,9 +160,25 @@ def portd_functionality_tc3(sw1, step):
     sw1("ip address 13.1.1.1/8")
     sw1("exit")
     step("Verifying internal VLAN assigned to interface 4 in the DB")
+    command = "get port 4 hw_config:internal_vlan_id"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'vsctl',
+        max_try=10,
+        str1="4000")
     output = sw1("get port 4 hw_config:internal_vlan_id", shell='vsctl')
     assert '"4000"' in output
     step("Verifying internal VLAN assigned to interface 4 in the kernel")
+    command = "ip netns exec swns ip addr show 4"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'bash',
+        max_try=10,
+        str1="inet")
     output = sw1("ip netns exec swns ip addr show 4", shell='bash')
     assert 'inet 13.1.1.1/8' in output
 
@@ -196,12 +268,29 @@ def portd_functionality_tc6(sw1, step):
     assert 'UP' in output[indexval - 1]
     step("Verifying interface 3 ipv4 and ipv6 addresses in the kernel"
          " after 'no shut'")
+    command = "ip netns exec swns ip addr show 3"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'bash',
+        max_try=20,
+        str1="inet",
+        str2="inet6")
     output = sw1("ip netns exec swns ip addr show 3", shell='bash')
     assert 'inet 12.1.1.1/8' in output
     assert 'inet6 1000::1/120' in output
     step("Bringing interface 3 down")
     sw1("shutdown")
     step("Verifying interface 3 'down' in the kernel")
+    command = "ip netns exec swns ip addr show 3"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'bash',
+        max_try=10,
+        str1="BROADCAST")
     output = sw1("ip netns exec swns ifconfig 3", shell='bash')
     output = output.split()
     indexval = output.index("BROADCAST")
@@ -214,6 +303,15 @@ def portd_functionality_tc6(sw1, step):
     sw1("exit")
     step("Re-verifying interface 3 ipv4 and ipv6 addresses in the kernel"
          " after 'no shut'")
+    command = "ip netns exec swns ip addr show 3"
+    execute_command_and_verify_response(
+        sw1,
+        step,
+        command,
+        'bash',
+        max_try=20,
+        str1="inet",
+        str2="inet6")
     output = sw1("ip netns exec swns ip addr show 3", shell='bash')
     assert 'inet 12.1.1.1/8' in output
     assert 'inet6 1000::1/120' in output
