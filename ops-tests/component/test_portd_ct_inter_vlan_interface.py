@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # (c) Copyright 2016 Hewlett Packard Enterprise Development LP
 #
 # GNU Zebra is free software; you can redistribute it and/or modify it
@@ -36,36 +35,56 @@ hs1:if01 -- sw1:if01
 def test_portd_ct_inter_vlan_interface(topology, step):
     sw1 = topology.get("sw1")
     assert sw1 is not None
+
     vlan_interface = "vlan10"
     step("1-Checking inter-VLAN interface creation")
     sw1("configure terminal")
-    sw1("interface {vlan_interface}".format(**locals()),
-        shell='vtysh')
+    sw1("interface {vlan_interface}".format(**locals()))
+    sw1("end")
+
     sw1("ip netns exec swns bash", shell='bash')
     return_ = sw1("ifconfig -a "
                   " {vlan_interface}".format(**locals()),
                   shell='bash')
     assert vlan_interface in return_
+
     step("2-Adding IPv4 address to inter-VLAN interface")
     ipv4 = "192.168.0.1/30"
+    sw1("configure terminal")
+    sw1("interface {vlan_interface}".format(**locals()))
     sw1("ip address {ipv4}".format(**locals()))
+    sw1("end")
+
     return_ = sw1("ip addr show {vlan_interface}".format(**locals()),
                   shell='bash')
     assert ipv4 in return_
+
     step("3-Adding IPv6 address to inter-VLAN interface")
     ipv6 = "2000::1/120"
+    sw1("configure terminal")
+    sw1("interface {vlan_interface}".format(**locals()))
     sw1("ipv6 address {ipv6}".format(**locals()))
+    sw1("end")
+
     return_ = sw1("ip addr show {vlan_interface}".format(**locals()),
                   shell='bash')
     assert ipv6 in return_
+
     step("4-Deliting IPv6 address from inter-VLAN interface")
+    sw1("configure terminal")
+    sw1("interface {vlan_interface}".format(**locals()))
     sw1("no ipv6 address {ipv6}".format(**locals()))
+    sw1("end")
+
     return_ = sw1("ip addr show {vlan_interface}".format(**locals()),
                   shell='bash')
     assert ipv6 not in return_
+
     step("5-Inter-VLAN interface deletion")
-    sw1("exit")
+    sw1("configure terminal")
     sw1("no interface {vlan_interface}".format(**locals()))
+    sw1("end")
+
     sw1("ip netns exec swns bash", shell='bash')
     return_ = sw1("ifconfig -a {vlan_interface}".format(**locals()),
                   shell='bash')
