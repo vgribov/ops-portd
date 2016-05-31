@@ -579,6 +579,7 @@ portd_add_vlan_interface(const char *interface_name,
                          const unsigned short vlan_tag)
 {
     int ifindex;
+    int i;
     struct vrf *vrf = get_vrf_for_port(vlan_interface_name);
 
     struct {
@@ -600,6 +601,17 @@ portd_add_vlan_interface(const char *interface_name,
     ifindex             = portd_if_nametoindex(vrf, interface_name);
     #else
     ifindex             = if_nametoindex(interface_name);
+
+    /*
+     * Prior to creation of vlan interfaces we need the DEFAULT_BRIDGE_NAME
+     * (i.e bridge_normal) interface to be created in kernel. This has to be
+     * changed when we have multiple bridges. Then the corresponding bridge
+     * has to be selected for that vlan interface creation.
+     */
+    for (i = 0; (ifindex == 0 && i<BRIDGE_INT_MAX_RETRY); i++) {
+        sleep(1);
+        ifindex = if_nametoindex(interface_name);
+    }
     #endif
 
     if (ifindex == 0) {

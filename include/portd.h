@@ -72,6 +72,7 @@
         vrf == NULL?nl_sock: vrf->nl_sock
 
 #define SWITCH_NAMESPACE "swns"
+#define BRIDGE_INT_MAX_RETRY 5
 
 #ifdef VRF_ENABLE
 #define VRF_STATUS_KEY "namespace_ready"
