@@ -2322,8 +2322,9 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
         intf_row = portd_get_matching_interface_row(port_row);
 
         if ((port) &&
-           ((OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) ||
-           (OVSREC_IDL_IS_ROW_MODIFIED(intf_row, idl_seqno))))
+            (intf_row) &&
+            ((OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) ||
+            (OVSREC_IDL_IS_ROW_MODIFIED(intf_row, idl_seqno))))
         {
             if((NULL != port->type) &&
                     (strcmp(port->type,
