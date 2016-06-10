@@ -2886,6 +2886,8 @@ portd_kernel_if_sync_check_on_init (void)
 {
     struct shash kernel_port_list;
     const struct ovsrec_interface *intf_row;
+    struct kernel_port *kernel_port;
+    struct shash_node *node, *next;
     unsigned int wait_for_kernel_if_sync;
 
     shash_init (&kernel_port_list);
@@ -2902,8 +2904,16 @@ portd_kernel_if_sync_check_on_init (void)
         }
     }
 
-    VLOG_DBG ("%u interfaces are yet be created in the kernel", wait_for_kernel_if_sync);
+    SHASH_FOR_EACH_SAFE (node, next, &kernel_port_list) {
+        kernel_port = node->data;
+        hmap_destroy(&kernel_port->ip4addr);
+        hmap_destroy(&kernel_port->ip6addr);
+        SAFE_FREE(kernel_port->name);
+        SAFE_FREE(kernel_port);
+    }
+    shash_destroy(&kernel_port_list);
 
+    VLOG_DBG ("%u interfaces are yet be created in the kernel", wait_for_kernel_if_sync);
     return wait_for_kernel_if_sync;
 }
 
@@ -3076,6 +3086,7 @@ portd_reconfigure(void)
         portd_netlink_socket_open(DEFAULT_VRF_NAME, &init_sock, true);
         if (portd_kernel_if_sync_check_on_init()) {
             VLOG_DBG ("kernel if NOT in sync - returning!!");
+            sleep (1);
             return;
         }
         portd_vlan_config_on_init();
