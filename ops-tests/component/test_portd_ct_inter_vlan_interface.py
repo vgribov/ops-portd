@@ -39,6 +39,8 @@ def test_portd_ct_inter_vlan_interface(topology, step):
     vlan_interface = "vlan10"
     step("1-Checking inter-VLAN interface creation")
     sw1("configure terminal")
+    sw1("vlan 10")
+    sw1("no shutdown")
     sw1("interface {vlan_interface}".format(**locals()))
     sw1("end")
 
