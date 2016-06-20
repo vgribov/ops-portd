@@ -138,6 +138,7 @@ portd_config_iprouting(int enable)
     const char *ipv4_path = "/proc/sys/net/ipv4/ip_forward";
     const char *ipv6_path = "/proc/sys/net/ipv6/conf/all/forwarding";
     const char *icmp_bcast = "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts";
+    const char *source_route = "/proc/sys/net/ipv4/conf/all/accept_source_route";
 
     nbytes = snprintf(buf, 2, "%d", enable);
     if ((fd = open(ipv4_path, O_WRONLY)) == -1) {
@@ -179,6 +180,23 @@ portd_config_iprouting(int enable)
         return;
     }
     close(fd);
+
+    /* By default value in this file is set to 0,
+     * Changing value to one to enable source routing support,
+     * when routing is enabled.
+     */
+    nbytes = snprintf(buf, 2, "%d", enable);
+    if ((fd = open(source_route, O_WRONLY)) == -1) {
+        VLOG_ERR("Unable to open %s (%s)", source_route, strerror(errno));
+        return;
+    }
+    if (write(fd, buf, nbytes) == -1) {
+        VLOG_ERR("Unable to write to %s (%s)", source_route, strerror(errno));
+        close(fd);
+        return;
+    }
+    close(fd);
+    VLOG_DBG("%s ipv4 source route", (enable == 1 ? "Enabled" : "Disabled"));
 }
 
 /* Take care of add/delete/modify of v4/v6 address from db */
