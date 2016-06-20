@@ -95,7 +95,7 @@ bool create_linux_bond(char* bond_name)
         fprintf (masters_file, "+%s", bond_name);
         fclose(masters_file);
 
-        sprintf(file_path, BONDING_MODE_PATH, bond_name);
+        snprintf(file_path, MAX_FILE_PATH_LEN, BONDING_MODE_PATH, bond_name);
         masters_file = fopen (file_path, WRITE_UPDATE);
 
         if(masters_file) {
@@ -132,7 +132,7 @@ bool add_slave_to_bond(char* bond_name, char* slave_name)
     VLOG_INFO("bond: Adding bonding slave %s to bond %s",
               slave_name, bond_name);
 
-    sprintf(file_path, BONDING_SLAVES_PATH, bond_name);
+    snprintf(file_path, MAX_FILE_PATH_LEN, BONDING_SLAVES_PATH, bond_name);
 
     slaves_file = fopen (file_path, WRITE_UPDATE);
 
@@ -165,7 +165,7 @@ bool remove_slave_from_bond(char* bond_name, char* slave_name)
     VLOG_INFO("bond: Removing bonding slave %s from bond %s",
              slave_name, bond_name);
 
-    sprintf(file_path, BONDING_SLAVES_PATH, bond_name);
+    snprintf(file_path,MAX_FILE_PATH_LEN, BONDING_SLAVES_PATH, bond_name);
 
     slaves_file = fopen (file_path, WRITE_UPDATE);
 
@@ -197,7 +197,7 @@ void portd_bonding_configuration_file_dump(struct ds *ds, char* bond_name)
     FILE * configuration_file;
     int char_to_print;
 
-    sprintf(file_path, BONDING_CONFIGURATION, bond_name);
+    snprintf(file_path, MAX_FILE_PATH_LEN, BONDING_CONFIGURATION, bond_name);
     configuration_file = fopen (file_path, READ);
 
     if(configuration_file) {

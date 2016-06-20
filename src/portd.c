@@ -77,7 +77,8 @@ COVERAGE_DEFINE(portd_reconfigure);
 #define LAG_NAME_SUFFIX           "lag"
 #define BUF_LEN 16000
 #define MAX_ERR_STR_LEN 500
-
+#define IPV4_ADDR_STR_MAXLEN  16
+#define MAX_LOOPBACK_CMD_LENGTH 128
 int nl_sock = -1; /* Netlink socket */
 int init_sock = -1; /* This sock will only be used during init */
 
@@ -536,7 +537,7 @@ portd_vrf_lookup(const char *name)
     struct vrf *vrf;
 
     HMAP_FOR_EACH_WITH_HASH (vrf, node, hash_string(name, 0), &all_vrfs) {
-        if (!strcmp(vrf->name, name)) {
+        if ( vrf && !strcmp(vrf->name, name)) {
             return vrf;
         }
     }
@@ -562,7 +563,7 @@ portd_port_lookup(const struct vrf *vrf, const char *name)
 
     HMAP_FOR_EACH_WITH_HASH (port, port_node, hash_string(name, 0),
                              &vrf->ports) {
-        if (!strcmp(port->name, name)) {
+        if (port && !strcmp(port->name, name)) {
             return port;
         }
     }
@@ -1199,7 +1200,8 @@ add_link_attr(struct nlmsghdr *n, int nlmsg_maxlen,
     rta = NLMSG_TAIL(n);
     rta->rta_type = attr_type;
     rta->rta_len = len;
-    memcpy(RTA_DATA(rta), payload, payload_len);
+    if(payload_len)
+         memcpy(RTA_DATA(rta), payload, payload_len);
     n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len);
     return 0;
 }
@@ -1343,11 +1345,10 @@ masklen2ip (int masklen,char* netmask)
     while (j--)
       address[i++] = *data++;
 
-    sprintf(netmask,"%d.%d.%d.%d",
+    snprintf(netmask,IPV4_ADDR_STR_MAXLEN ,"%d.%d.%d.%d",
             address[0],address[1],address[2],address[3]);
 }
 
-#define LOOPBACK_NAME_STR_LEN 256
 
 #define ifreq_offsetof(x)  offsetof(struct ifreq, x)
 
@@ -1355,8 +1356,8 @@ masklen2ip (int masklen,char* netmask)
 bool
 portd_delete_loopback_interface(const char *port_name)
 {
-    char loopback_name[LOOPBACK_NAME_STR_LEN] = {0};
-    sprintf(loopback_name, "lo:%s", port_name+2);
+    char loopback_name[IFNAMSIZ] = {0};
+    snprintf(loopback_name, IFNAMSIZ, "lo:%s", port_name+2);
     struct ifreq ifr;
     int sockfd;
 
@@ -1364,7 +1365,7 @@ portd_delete_loopback_interface(const char *port_name)
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
 
     /* get interface name */
-    strncpy(ifr.ifr_name, loopback_name, sizeof(loopback_name)/sizeof(char));
+    strncpy(ifr.ifr_name, loopback_name, sizeof(ifr.ifr_name)/sizeof(char));
 
     ifr.ifr_flags = IFF_LOOPBACK;
     if(-1 == ioctl(sockfd, SIOCSIFFLAGS, &ifr))
@@ -1383,8 +1384,8 @@ portd_delete_loopback_interface(const char *port_name)
 bool
 portd_reconfigure_loopback_interface(const struct ovsrec_port *port_row)
 {
-    char loopback_name[LOOPBACK_NAME_STR_LEN] = {0};
-    sprintf(loopback_name, "lo:%s", port_row->name+2);
+    char loopback_name[IFNAMSIZ] = {0};
+    snprintf(loopback_name,IFNAMSIZ, "lo:%s", port_row->name+2);
 
     struct ifreq ifr;
     struct sockaddr_in sai;
@@ -1396,7 +1397,7 @@ portd_reconfigure_loopback_interface(const struct ovsrec_port *port_row)
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
 
     /* get interface name */
-    strncpy(ifr.ifr_name, loopback_name, sizeof(loopback_name)/sizeof(char));
+    strncpy(ifr.ifr_name, loopback_name, sizeof(ifr.ifr_name)/sizeof(char));
     if (port_row->ip4_address)
     {
        char *ip_address = xstrdup(port_row->ip4_address);
@@ -1439,6 +1440,7 @@ portd_reconfigure_loopback_interface(const struct ovsrec_port *port_row)
        {
            VLOG_ERR("Failed to update netmask for %s", loopback_name);
        }
+       free(ip_address);
     }
 
     ifr.ifr_flags |= IFF_UP | IFF_RUNNING | IFF_LOOPBACK;
@@ -2018,10 +2020,10 @@ portd_alloc_internal_vlan(void)
                  ascending ? j++ : j--) {
 
                 char port_name[8] = {0};
-                char vlan_id[4] = {0};
+                char vlan_id[8] = {0};
 
                 strncat(port_name, INTERFACE_TYPE_VLAN, strlen(INTERFACE_TYPE_VLAN));
-                sprintf(vlan_id, "%d", j);
+                snprintf(vlan_id,5, "%d", j);
                 strncat(port_name, vlan_id, strlen(vlan_id));
                 if (portd_check_vlan_interface(port_name)) {
                     continue;
@@ -3262,14 +3264,14 @@ static void
 portd_dump(char* buf, int buflen, const char* feature)
 {
     if (strcmp(feature, "subinterface") == 0)
-       sprintf(buf, "Number of Configured sub-interfaces are : %d.", subintf_count);
+       snprintf(buf, buflen, "Number of Configured sub-interfaces are : %d.", subintf_count);
     else if (strcmp(feature, "loopback") == 0)
-       sprintf(buf, "Number of Configured loopback interfaces are : %d.", lpbk_count);
+       snprintf(buf, buflen, "Number of Configured loopback interfaces are : %d.", lpbk_count);
     /* Dump Linux bonding configuration for lacp feature. */
     else if (strcmp(feature, "lacp") == 0) {
         struct ds ds = DS_EMPTY_INITIALIZER;
         portd_bonding_configuration_dump(&ds, 0, NULL);
-        sprintf(buf, "%s", ds_cstr(&ds));
+        snprintf(buf, buflen, "%s", ds_cstr(&ds));
     }
 }
 
@@ -3394,7 +3396,7 @@ portd_reconfig_ns_loopback(struct port *port,
                            struct ovsrec_port *port_row)
 {
     int fd;
-    char ns[512] = {0};
+    char ns[32] = {0};
     int status;
     int pid = fork();
 
@@ -3403,7 +3405,7 @@ portd_reconfig_ns_loopback(struct port *port,
       wait(&status);
       return EXIT_SUCCESS;
     }else{
-      sprintf(ns, "/proc/1/ns/net");
+      snprintf(ns, 32, "/proc/1/ns/net");
       fd = open(ns, O_RDONLY);   /* Get descriptor for namespace */
 
       if (fd == -1)
@@ -3430,18 +3432,18 @@ void
 portd_reconfig_loopback_ipaddr(struct port *port,
                            struct ovsrec_port *port_row)
 {
-    char cmd[512] = {0};
+    char cmd[MAX_LOOPBACK_CMD_LENGTH] = {0};
     if (port->ip6_address){
        if (port_row->ip6_address){
           if (strcmp(port->ip6_address, port_row->ip6_address) == 0) {
-             sprintf(cmd,"/sbin/ip -6 address add %s dev lo:%s",
+             snprintf(cmd, MAX_LOOPBACK_CMD_LENGTH, "/sbin/ip -6 address add %s dev lo:%s",
                      port->ip6_address, port->name+2);
           }else {
-             sprintf(cmd, "/sbin/ip addr del %s dev lo:%s",
+             snprintf(cmd, MAX_LOOPBACK_CMD_LENGTH, "/sbin/ip addr del %s dev lo:%s",
                      port->ip6_address, port->name+2);
           }
        }else{
-          sprintf(cmd, "/sbin/ip addr del %s dev lo:%s",
+          snprintf(cmd, MAX_LOOPBACK_CMD_LENGTH, "/sbin/ip addr del %s dev lo:%s",
                   port->ip6_address, port->name+2);
        }
        if (system(cmd) != 0){

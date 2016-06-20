@@ -134,12 +134,12 @@ void
 portd_config_iprouting(int enable)
 {
     int fd = -1, nbytes = 0;
-    char buf[16];
+    char buf[4];
     const char *ipv4_path = "/proc/sys/net/ipv4/ip_forward";
     const char *ipv6_path = "/proc/sys/net/ipv6/conf/all/forwarding";
     const char *icmp_bcast = "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts";
 
-    nbytes = sprintf(buf, "%d", enable);
+    nbytes = snprintf(buf, 2, "%d", enable);
     if ((fd = open(ipv4_path, O_WRONLY)) == -1) {
         VLOG_ERR("Unable to open %s (%s)", ipv4_path, strerror(errno));
         return;
@@ -168,7 +168,7 @@ portd_config_iprouting(int enable)
      * Changing value to zero to allow broadcast ping
      * when routing is enabled.
      */
-    nbytes = sprintf(buf, "%d", !enable);
+    nbytes = snprintf(buf, 2, "%d", !enable);
     if ((fd = open(icmp_bcast, O_WRONLY)) == -1) {
         VLOG_ERR("Unable to open %s (%s)", icmp_bcast, strerror(errno));
         return;
@@ -1144,7 +1144,7 @@ portd_ip6_addr_find(struct port *cfg, const char *address)
 
     HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
                              &cfg->secondary_ip6addr) {
-        if (!strcmp(addr->address, address)) {
+        if (addr && !strcmp(addr->address, address)) {
             return addr;
         }
     }
@@ -1159,7 +1159,7 @@ portd_ip4_addr_find(struct port *cfg, const char *address)
 
     HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
                              &cfg->secondary_ip4addr) {
-        if (!strcmp(addr->address, address)) {
+        if (addr && !strcmp(addr->address, address)) {
             return addr;
         }
     }
@@ -1179,14 +1179,14 @@ portd_find_ip_addr_kernel(struct kernel_port *port,
     if (ipv6) {
         HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
                                      &port->ip6addr) {
-            if (!strcmp(addr->address, address)) {
+            if ( addr && !strcmp(addr->address, address)) {
                 return true;
             }
         }
     } else {
         HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
                                      &port->ip4addr) {
-            if (!strcmp(addr->address, address)) {
+            if (addr && !strcmp(addr->address, address)) {
                 return true;
             }
         }
@@ -1209,7 +1209,7 @@ portd_find_ip_addr_db(struct port *port, const char *address, bool ipv6)
         }
         HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
                                      &port->secondary_ip6addr) {
-            if (!strcmp(addr->address, address)) {
+            if (addr && !strcmp(addr->address, address)) {
                 return true;
             }
         }
@@ -1219,7 +1219,7 @@ portd_find_ip_addr_db(struct port *port, const char *address, bool ipv6)
         }
         HMAP_FOR_EACH_WITH_HASH (addr, addr_node, hash_string(address, 0),
                                      &port->secondary_ip4addr) {
-            if (!strcmp(addr->address, address)) {
+            if (addr && !strcmp(addr->address, address)) {
                 return true;
             }
         }
@@ -1423,7 +1423,8 @@ add_link_attr(struct nlmsghdr *n, int nlmsg_maxlen,
     rta = NLMSG_TAIL(n);
     rta->rta_type = attr_type;
     rta->rta_len = len;
-    memcpy(RTA_DATA(rta), payload, payload_len);
+    if(payload_len > 0)
+       memcpy(RTA_DATA(rta), payload, payload_len);
     n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len);
     return 0;
 }
@@ -1460,7 +1461,7 @@ portd_kernel_ip_addr_lookup(struct kernel_port *kernel_port,
             /*
              * Match the IPv6 address in the existing hash map
              */
-            if (addr->address && (strcmp(addr->address, ip_address) == 0)) {
+            if (addr && addr->address && (strcmp(addr->address, ip_address) == 0)) {
                 return true;
             }
         }
@@ -1470,7 +1471,7 @@ portd_kernel_ip_addr_lookup(struct kernel_port *kernel_port,
             /*
              * Match the IPv4 address in the existing hash map
              */
-            if (addr->address && (strcmp(addr->address, ip_address) == 0)) {
+            if (addr && addr->address && (strcmp(addr->address, ip_address) == 0)) {
                 return true;
             }
         }
