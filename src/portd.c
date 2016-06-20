@@ -893,32 +893,6 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_vlan_col_internal_usage);
     ovsdb_idl_omit_alert(idl, &ovsrec_vlan_col_internal_usage);
 
-    /*
-     * This daemon is also responsible for adding routes for
-     * directly connected subnets.
-     */
-    ovsdb_idl_add_table(idl, &ovsrec_table_nexthop);
-    ovsdb_idl_add_column(idl, &ovsrec_nexthop_col_ports);
-    ovsdb_idl_omit_alert(idl, &ovsrec_nexthop_col_ports);
-
-    ovsdb_idl_add_table(idl, &ovsrec_table_route);
-    ovsdb_idl_add_column(idl, &ovsrec_route_col_prefix);
-    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_prefix);
-    ovsdb_idl_add_column(idl, &ovsrec_route_col_from);
-    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_from);
-    ovsdb_idl_add_column(idl, &ovsrec_route_col_nexthops);
-    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_nexthops);
-    ovsdb_idl_add_column(idl, &ovsrec_route_col_address_family);
-    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_address_family);
-    ovsdb_idl_add_column(idl, &ovsrec_route_col_sub_address_family);
-    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_sub_address_family);
-    ovsdb_idl_add_column(idl, &ovsrec_route_col_distance);
-    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_distance);
-    ovsdb_idl_add_column(idl, &ovsrec_route_col_vrf);
-    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_vrf);
-    ovsdb_idl_add_column(idl, &ovsrec_route_col_selected);
-    ovsdb_idl_omit_alert(idl, &ovsrec_route_col_selected);
-
     INIT_DIAG_DUMP_BASIC(portd_diag_dump_basic_subif_lpbk);
     unixctl_command_register("portd/dump", "", 0, 0,
                              portd_unixctl_dump, NULL);
