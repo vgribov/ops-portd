@@ -814,7 +814,7 @@ portd_init(const char *remote)
     ovsdb_idl_add_column(idl, &ovsrec_port_col_ip6_address);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_ip6_address_secondary);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_interfaces);
-    ovsdb_idl_add_column(idl, &ovsrec_port_col_tag);
+    ovsdb_idl_add_column(idl, &ovsrec_port_col_vlan_tag);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_admin);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_status);
     ovsdb_idl_omit_alert(idl, &ovsrec_port_col_status);
@@ -2017,7 +2017,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                 portd_port_in_vrf_check(port_row->name, DEFAULT_VRF_NAME)) {
 
                 portd_add_vlan_interface(DEFAULT_BRIDGE_NAME, port_row->name,
-                                         *(port->cfg->tag));
+                                         ops_port_get_tag(port->cfg));
                 portd_interface_up_down(port_row->name, "up");
 
                 port->type = xstrdup(OVSREC_INTERFACE_TYPE_INTERNAL);
