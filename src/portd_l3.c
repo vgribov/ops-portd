@@ -190,6 +190,36 @@ portd_config_iprouting(int enable)
     VLOG_DBG("%s ipv4 source route", (enable == 1 ? "Enabled" : "Disabled"));
 }
 
+/* write to /proc entries to enable/disable configuration on a port */
+void
+portd_config_routing(const char *port_name, bool enable)
+{
+    int fd = -1, nbytes = 0;
+    char buf[4];
+
+    char filename[PROC_FILE_LENGTH];
+
+    snprintf(filename, PROC_FILE_LENGTH, "%s%s%s", "/proc/sys/net/ipv4/conf/",
+             port_name, "/accept_source_route");
+
+    /* By default value in this file is set to 0,
+     * Changing value to one to enable source routing support on a port,
+     * when routing is enabled.
+     */
+    nbytes = snprintf(buf, 2, "%d", enable);
+    if ((fd = open(filename, O_WRONLY)) == -1) {
+        VLOG_ERR("Unable to open %s (%s)", filename, strerror(errno));
+        return;
+    }
+    if (write(fd, buf, nbytes) == -1) {
+        VLOG_ERR("Unable to write to %s (%s)", filename, strerror(errno));
+        close(fd);
+        return;
+    }
+    close(fd);
+    VLOG_DBG("%s ipv4 source route", (enable == 1 ? "Enabled" : "Disabled"));
+}
+
 /* Take care of add/delete/modify of v4/v6 address from db */
 void
 portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row)

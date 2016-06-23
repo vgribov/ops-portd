@@ -55,10 +55,12 @@
 
 #define INET6_ADDRSTRLEN    46
 #define INET6_PREFIX_SIZE   49
+#define PROC_FILE_LENGTH    128
 
 #define CONNECTED_ROUTE_DISTANCE    0
 
 #define PORT_NAME_MAX_LEN 32
+
 
 #define NLMSG_TAIL(nmsg) \
         ((struct rtattr *) (((void *) (nmsg)) + \
@@ -210,6 +212,7 @@ void nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
                        int family, bool secondary);
 
 void portd_config_iprouting(int enable);
+void portd_config_routing(const char *port_name, bool enable);
 void portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row);
 void portd_del_ipaddr(struct port *port);
 void portd_ipaddr_config_on_init(void);

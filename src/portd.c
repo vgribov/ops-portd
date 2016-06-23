@@ -2152,6 +2152,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
         if (!port) {
             VLOG_DBG("Creating new port %s vrf %s\n",port_row->name, vrf->name);
             portd_port_create(vrf, port_row);
+            portd_config_routing(port_row->name, true);
             port = portd_port_lookup(vrf, port_row->name);
 
 #ifdef VRF_ENABLE
@@ -2393,6 +2394,7 @@ portd_port_destroy(struct port *port)
             SAFE_FREE(addr);
         }
         hmap_destroy(&port->secondary_ip6addr);
+        portd_config_routing(port->name, false);
         hmap_remove(&vrf->ports, &port->port_node);
         SAFE_FREE(port->name);
         SAFE_FREE(port);
