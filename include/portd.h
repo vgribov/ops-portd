@@ -73,14 +73,7 @@
 #define NL_SOCK(vrf) \
         vrf == NULL?nl_sock: vrf->nl_sock
 
-#define SWITCH_NAMESPACE "swns"
 #define BRIDGE_INT_MAX_RETRY 5
-
-#ifdef VRF_ENABLE
-#define VRF_STATUS_KEY "namespace_ready"
-#define VRF_STATUS_VALUE "true"
-#define MAX_BUFFER_LENGTH 256
-#endif
 
 #define SAFE_FREE(x) \
         if (x) {free(x);x = NULL;};
@@ -113,6 +106,7 @@ struct vrf {
     /* Used during reconfiguration. */
     struct shash wanted_ports;
     int nl_sock;
+    int64_t table_id;
 };
 
 struct net_address {
@@ -212,7 +206,8 @@ void nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
                        int family, bool secondary);
 
 void portd_config_iprouting(int enable);
-void portd_config_routing(const char *port_name, bool enable);
+void
+portd_config_src_routing(struct vrf *vrf, const char *port_name, bool enable);
 void portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row);
 void portd_del_ipaddr(struct port *port);
 void portd_ipaddr_config_on_init(void);
@@ -235,4 +230,7 @@ void portd_arbiter_init(void);
 void portd_arbiter_run(void);
 void portd_arbiter_port_run(const struct ovsrec_port *port,
                             struct smap *forwarding_state);
+int
+get_vrf_ns_from_table_id(const struct ovsdb_idl *idl, const int64_t table_id,
+                         char* vrf_ns_name);
 #endif /* PORTD_H_ */
