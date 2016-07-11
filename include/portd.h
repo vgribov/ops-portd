@@ -205,7 +205,7 @@ void parse_nl_ip_address_msg_on_init(struct nlmsghdr *nlh, int msglen,
 void nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
                        int family, bool secondary);
 
-void portd_config_iprouting(int enable);
+void portd_config_iprouting(const char *vrf_name, int enable);
 void
 portd_config_src_routing(struct vrf *vrf, const char *port_name, bool enable);
 void portd_reconfig_ipaddr(struct port *port, struct ovsrec_port *port_row);

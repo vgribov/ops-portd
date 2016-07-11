@@ -213,7 +213,7 @@ extern int
 portd_get_prefix(int family, char *ip_address, void *prefix,
                  unsigned char *prefixlen);
 void
-portd_del_subinterface(const char *sub_interface_name);
+portd_del_interface_netlink(const char *sub_interface_name, struct vrf *vrf);
 
 /* Lag bonding related functions */
 static void portd_del_old_interface(struct shash_node *sh_node);
@@ -227,12 +227,10 @@ static void portd_handle_port_config(const struct ovsrec_port *row,
 static void portd_update_interface_lag_eligibility(struct iface_data *idp);
 
 int
-portd_reconfig_ns_loopback(struct port *port,
-                           struct ovsrec_port *port_row);
+portd_reconfig_ns_loopback(struct ovsrec_port *port_row, bool create_flag);
 
 void
-portd_reconfig_loopback_ipaddr(struct port *port,
-                           struct ovsrec_port *port_row);
+portd_reconfig_loopback_ipaddr(struct ovsrec_port *port_row);
 void
 portd_register_event_log(struct ovsrec_port *port_row,
                                      struct port *port);
@@ -869,7 +867,7 @@ portd_init(const char *remote)
 
     /* By default, we disable routing at the start.
      * Enabling will be done as part of reconfigure. */
-    portd_config_iprouting(PORTD_DISABLE_ROUTING);
+    portd_config_iprouting(DEFAULT_VRF_NAME, PORTD_DISABLE_ROUTING);
 
     retval = event_log_init("PORT");
     if(retval < 0) {
@@ -948,8 +946,9 @@ portd_set_hw_cfg(struct port *port, const struct ovsrec_port *port_row)
     smap_destroy(&hw_cfg_smap);
     commit_txn = true;
 }
-#ifdef VRF_ENABLE
-unsigned int portd_if_nametoindex(struct vrf *vrf, const char *name) {
+
+unsigned int portd_if_nametoindex(struct vrf *vrf, const char *name)
+{
     int status;
     unsigned int ifindex = 0;
     int pipe_fd[2];
@@ -1000,8 +999,8 @@ unsigned int portd_if_nametoindex(struct vrf *vrf, const char *name) {
            _exit(EXIT_SUCCESS);
     }
     return EXIT_SUCCESS;
-  }
-#endif
+}
+
 /*
  * Function: portd_set_interface_mtu
  * Param:
@@ -1031,11 +1030,7 @@ portd_set_interface_mtu(const char *interface_name, unsigned int mtu)
     req.n.nlmsg_flags   = NLM_F_REQUEST;
 
     req.i.ifi_family    = AF_UNSPEC;
-    #ifdef VRF_ENABLE
     req.i.ifi_index     = portd_if_nametoindex(vrf, interface_name);
-    #else
-    req.i.ifi_index     = if_nametoindex(interface_name);
-    #endif
     if (req.i.ifi_index == 0) {
         VLOG_ERR("Unable to get ifindex for interface: %s/%d", interface_name, __LINE__);
         return;
@@ -1093,11 +1088,7 @@ portd_interface_up_down(const char *interface_name, const char *status)
     req.n.nlmsg_flags   = NLM_F_REQUEST;
 
     req.i.ifi_family    = AF_UNSPEC;
-    #ifdef VRF_ENABLE
     req.i.ifi_index     = portd_if_nametoindex(vrf, interface_name);
-    #else
-    req.i.ifi_index     = if_nametoindex(interface_name);
-    #endif
 
     if (req.i.ifi_index == 0) {
         VLOG_ERR("Unable to get ifindex for interface: %s ns (%s)",
@@ -1208,7 +1199,7 @@ portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
     }
 
     if(0 == vlan_tag) intf_status = false;
-    portd_del_subinterface(port_row->name);
+        portd_del_interface_netlink(port_row->name, vrf);
     if (0 != vlan_tag) {
         VLOG_INFO("Creating subinterface %s", port_row->name);
 
@@ -1218,11 +1209,7 @@ portd_reconfigure_subinterface(const struct ovsrec_port *port_row)
         req.n.nlmsg_flags   = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
 
         req.i.ifi_family    = AF_UNSPEC;
-        #ifdef VRF_ENABLE
         ifindex             = portd_if_nametoindex(vrf, parent_intf_row->name);
-        #else
-        ifindex             = if_nametoindex(parent_intf_row->name);
-        #endif
 
         if (ifindex == 0) {
             VLOG_ERR("Unable to get ifindex for interface: %s line number %d",
@@ -1291,117 +1278,14 @@ masklen2ip (int masklen,char* netmask)
 
 #define ifreq_offsetof(x)  offsetof(struct ifreq, x)
 
-
-bool
-portd_delete_loopback_interface(const char *port_name)
-{
-    char loopback_name[IFNAMSIZ] = {0};
-    snprintf(loopback_name, IFNAMSIZ, "lo:%s", port_name+2);
-    struct ifreq ifr;
-    int sockfd;
-
-    /* Create a channel to the NET kernel. */
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-
-    /* get interface name */
-    strncpy(ifr.ifr_name, loopback_name, sizeof(ifr.ifr_name)/sizeof(char));
-
-    ifr.ifr_flags = IFF_LOOPBACK;
-    if(-1 == ioctl(sockfd, SIOCSIFFLAGS, &ifr))
-    {
-        VLOG_ERR("Failed to delete %s", loopback_name);
-    }
-    else
-    {
-        VLOG_INFO("Deleted loopback interface %s", loopback_name );
-    }
-    close(sockfd);
-    return true;
-}
-
-
-bool
-portd_reconfigure_loopback_interface(const struct ovsrec_port *port_row)
-{
-    char loopback_name[IFNAMSIZ] = {0};
-    snprintf(loopback_name,IFNAMSIZ, "lo:%s", port_row->name+2);
-
-    struct ifreq ifr;
-    struct sockaddr_in sai;
-    int sockfd;
-
-    portd_delete_loopback_interface(port_row->name);
-
-    /* Create a channel to the NET kernel. */
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-
-    /* get interface name */
-    strncpy(ifr.ifr_name, loopback_name, sizeof(ifr.ifr_name)/sizeof(char));
-    if (port_row->ip4_address)
-    {
-       char *ip_address = xstrdup(port_row->ip4_address);
-       int prefixlen = 0;
-       char netmask[17] = {0};
-       char *p = strchr(ip_address,'/');
-       if(p)
-       {
-           *p++ = '\0';
-           prefixlen = 32;
-       }
-       masklen2ip(prefixlen, netmask);
-
-       /* Update values using ioctls */
-       memset(&sai, 0, sizeof(struct sockaddr));
-       sai.sin_family = AF_INET;
-       sai.sin_port = 0;
-
-       sai.sin_addr.s_addr = inet_addr(ip_address);
-
-       p = (char *) &sai;
-       memcpy( (((char *)&ifr + ifreq_offsetof(ifr_addr) )),
-               p, sizeof(struct sockaddr));
-
-       if(-1 == ioctl(sockfd, SIOCSIFADDR, &ifr))
-       {
-           VLOG_ERR("Failed to update IP address for %s", loopback_name);
-       }
-
-       sai.sin_family = AF_INET;
-       sai.sin_port = 0;
-
-       sai.sin_addr.s_addr = inet_addr(netmask);
-
-       p = (char *) &sai;
-       memcpy( (((char *)&ifr + ifreq_offsetof(ifr_addr))),
-               p, sizeof(struct sockaddr));
-
-       if(-1 == ioctl(sockfd, SIOCSIFNETMASK, &ifr))
-       {
-           VLOG_ERR("Failed to update netmask for %s", loopback_name);
-       }
-       free(ip_address);
-    }
-
-    ifr.ifr_flags |= IFF_UP | IFF_RUNNING | IFF_LOOPBACK;
-
-    if(-1 == ioctl(sockfd, SIOCSIFFLAGS, &ifr))
-    {
-        VLOG_ERR("Failed to update %s", loopback_name);
-    }
-    close(sockfd);
-    return true;
-}
-
-
 void
-portd_del_subinterface(const char *sub_interface_name)
+portd_del_interface_netlink(const char *interface_name, struct vrf *vrf)
 {
     struct {
         struct nlmsghdr  n;
         struct ifinfomsg i;
         char             buf[128];
     } req;
-    struct vrf *vrf = get_vrf_for_port(sub_interface_name);
 
     memset(&req, 0, sizeof(req));
 
@@ -1411,25 +1295,21 @@ portd_del_subinterface(const char *sub_interface_name)
     req.n.nlmsg_flags   = NLM_F_REQUEST;
 
     req.i.ifi_family    = AF_UNSPEC;
-    #ifdef VRF_ENABLE
-    req.i.ifi_index     = portd_if_nametoindex(vrf, sub_interface_name);
-    #else
-    req.i.ifi_index     = if_nametoindex(sub_interface_name);
-    #endif
+    req.i.ifi_index     = portd_if_nametoindex(vrf, interface_name);
 
     if (req.i.ifi_index == 0) {
-        VLOG_ERR("Unable to get ifindex for subinterface: %s/%d",
-               sub_interface_name, __LINE__);
+        VLOG_ERR("Unable to get ifindex for interface: %s/%d",
+                 interface_name, __LINE__);
         return;
     }
 
     if (send(NL_SOCK(vrf), &req, req.n.nlmsg_len, 0) == -1) {
-        VLOG_ERR("Netlink failed to delete subinterface: %s (%s)",
-                sub_interface_name, strerror(errno));
+        VLOG_ERR("Netlink failed to delete interface: %s (%s)",
+                interface_name, strerror(errno));
         return;
     }
 
-    VLOG_INFO("Deleted subinterface %s", sub_interface_name);
+    VLOG_INFO("Deleted interface %s", interface_name);
     return;
 }
 
@@ -2147,8 +2027,9 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                 subintf_count++;
                 log_event("SUBINTERFACE_CREATE", EV_KV("interface", "%s", port_row->name));
             } else if (portd_interface_type_loopback_check(port_row,
-                    port_row->name)) {
-                portd_reconfigure_loopback_interface(port_row);
+                       port_row->name)) {
+                portd_reconfig_ns_loopback(port_row, (!strncmp(vrf->name, DEFAULT_VRF_NAME,
+                                                      strlen(DEFAULT_VRF_NAME))));
                 port->type = xstrdup(OVSREC_INTERFACE_TYPE_LOOPBACK);
                 lpbk_count++;
                 log_event("LOOPBACK_CREATE", EV_KV("interface", "%s", port_row->name));
@@ -2199,7 +2080,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                 if ((NULL != port->type) &&
                         (strcmp(port->type,
                                 OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
-                    portd_reconfig_ns_loopback(port, port_row);
+                    portd_reconfig_ns_loopback(port_row, false);
                     portd_register_event_log(port_row, port);
                     continue;
                 }
@@ -2271,11 +2152,8 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                             OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0)) {
                 char str[512] = {0};
                 portd_reconfigure_subinterface(port_row);
-                #ifdef VRF_ENABLE
+
                 if (portd_if_nametoindex(vrf, port_row->name))
-                #else
-                if (if_nametoindex(port_row->name))
-                #endif
                 {
                    if (port_row->ip4_address != NULL)
                    {
@@ -2301,7 +2179,7 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
             if((NULL != port->type) &&
                     (strcmp(port->type,
                             OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
-               portd_reconfig_ns_loopback(port, port_row);
+               portd_reconfig_ns_loopback(port_row, false);
             }
         }
     }
@@ -2367,6 +2245,9 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
 
     HMAP_FOR_EACH_SAFE (port, next, port_node, &vrf->ports) {
         port->cfg = shash_find_data(wanted_ports, port->name);
+        const struct ovsrec_port *row = shash_find_data(&all_ports,
+                                                        port->name);
+
         if (!port->cfg) {
 
             VLOG_DBG("Processing port delete port: %s type: %s",
@@ -2389,17 +2270,26 @@ portd_del_ports(struct vrf *vrf, const struct shash *wanted_ports)
             }
             else if(port->type &&
                     (strcmp(port->type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0)) {
-                portd_del_subinterface(port->name);
+                /* The port here is moved to default VRF if it was part of non-default VRF
+                 * but the port structure is not updated yet. Hence passing the default VRF
+                 * structure always from here */
+                portd_del_interface_netlink(port->name, portd_vrf_lookup(DEFAULT_VRF_NAME));
                 subintf_count--;
                 log_event("SUBINTERFACE_DELETE", EV_KV("interface",
-                               "%s", port->name));
+                          "%s", port->name));
             }
             else if(port->type &&
                     (strcmp(port->type, OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
-                     portd_delete_loopback_interface(port->name);
-                     lpbk_count--;
-                     log_event("LOOPBACK_DELETE", EV_KV("interface",
-                               "%s", port->name));
+                if (!row)
+                {
+                    /* The port here is moved to default VRF if it was part of non-default VRF
+                     * but the port structure is not updated yet. Hence passing the default VRF
+                     * structure always from here */
+                    portd_del_interface_netlink(port->name, portd_vrf_lookup(DEFAULT_VRF_NAME));
+                    lpbk_count--;
+                    log_event("LOOPBACK_DELETE", EV_KV("interface",
+                              "%s", port->name));
+                }
             }
 
             if (port->proxy_arp_enabled) {
@@ -2947,7 +2837,7 @@ portd_vrf_add(const struct ovsrec_vrf *vrf_row)
          portd_vrf_netlink_socket_open(vrf);
     }
 
-    portd_config_iprouting(PORTD_ENABLE_ROUTING);
+    portd_config_iprouting(vrf->name, PORTD_ENABLE_ROUTING);
     hmap_init(&vrf->ports);
     hmap_insert(&all_vrfs, &vrf->node, hash_string(vrf->name, 0));
 
@@ -3333,68 +3223,104 @@ ops_portd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
     unixctl_command_reply(conn, NULL);
 }
 
-int
-portd_reconfig_ns_loopback(struct port *port,
-                           struct ovsrec_port *port_row)
+bool portd_add_interface_netlink(struct ovsrec_port *port_row,
+                                 char* intf_type, int ifi_index)
 {
-    int fd;
-    char ns[32] = {0};
-    int status;
-    int pid = fork();
+    struct {
+        struct nlmsghdr  n;
+        struct ifinfomsg i;
+        char             buf[128];  /* must fit interface name length (IFNAMSIZ)
+                                       and attribute hdrs. */
+    } req;
 
-    if (pid){ /*Parent Process waits child to exit*/
-      portd_reconfig_loopback_ipaddr(port, port_row);
-      wait(&status);
-      return EXIT_SUCCESS;
-    }else{
-      snprintf(ns, 32, "/proc/1/ns/net");
-      fd = open(ns, O_RDONLY);   /* Get descriptor for namespace */
+    VLOG_INFO("Creating %s interface for interface %s", intf_type, port_row->name);
+    req.n.nlmsg_len = NLMSG_SPACE(sizeof(struct ifinfomsg));
+    req.n.nlmsg_pid     = getpid();
+    req.n.nlmsg_type    = RTM_NEWLINK;
+    req.n.nlmsg_flags   = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
+    req.i.ifi_family    = AF_UNSPEC;
+    req.i.ifi_index     = ifi_index;
 
-      if (fd == -1)
-      {
-          VLOG_ERR("Unable to open global namespace.");
-          _exit(EXIT_SUCCESS);
-      }
+    struct rtattr *linkinfo = NLMSG_TAIL(&req.n);
+    add_link_attr(&req.n, sizeof(req), IFLA_LINKINFO, NULL, 0);
+    add_link_attr(&req.n, sizeof(req), IFLA_INFO_KIND,
+                  intf_type, strlen(intf_type));
 
-      if (setns(fd, 0) == -1)         /* Join that namespace */
-      {
-          VLOG_ERR("Unable to join global namespace.");
-          close(fd);
-          _exit(EXIT_SUCCESS);
-      }
+    struct rtattr * data = NLMSG_TAIL(&req.n);
+    add_link_attr(&req.n, sizeof(req), IFLA_INFO_DATA, NULL, 0);
 
-      portd_reconfig_loopback_ipaddr(port, port_row);
-      close(fd);
-      _exit(EXIT_SUCCESS);
-   }
-   return EXIT_SUCCESS;
+    /* Adjust rta_len for attributes */
+    data->rta_len = (void *)NLMSG_TAIL(&req.n) - (void *)data;
+    linkinfo->rta_len = (void *)NLMSG_TAIL(&req.n) - (void *)linkinfo;
+
+    add_link_attr(&req.n, sizeof(req), IFLA_IFNAME, port_row->name,
+                  strlen(port_row->name)+1);
+
+    if (send(nl_sock, &req, req.n.nlmsg_len, 0) == -1) {
+        VLOG_ERR("Netlink failed to create netlink for interface: %s (%s)",
+                 port_row->name, strerror(errno));
+        return false;
+    }
+
+    return true;
+}
+
+int
+portd_reconfig_ns_loopback(struct ovsrec_port *port_row, bool create_flag)
+{
+    struct vrf *vrf = get_vrf_for_port(port_row->name);
+
+    if (create_flag)
+    {
+        if (!portd_add_interface_netlink(port_row, "dummy", 0))
+        {
+            VLOG_ERR("Netlink failed to create dummy interface: %s (%s)",
+	             port_row->name, strerror(errno));
+            return false;
+        }
+    }
+
+    if (vrf->cfg && strcmp(vrf->name, DEFAULT_VRF_NAME) &&
+                    vrf_is_ready(idl, vrf->name))
+    {
+        struct setns_info setns_local_info;
+        memcpy(&setns_local_info.from_ns[0], SWITCH_NAMESPACE,  strlen(SWITCH_NAMESPACE) + 1);
+        get_vrf_ns_from_table_id(idl, vrf->table_id, &setns_local_info.to_ns[0]);
+        memcpy(&setns_local_info.intf_name[0], port_row->name, strlen(port_row->name) + 1);
+        if (!nl_move_intf_to_vrf(&setns_local_info))
+        {
+            VLOG_ERR("Failed to move interface from %s to %s",
+                      SWITCH_NAMESPACE, vrf->name);
+        }
+    }
+
+    portd_reconfig_loopback_ipaddr(port_row);
+    return EXIT_SUCCESS;
 }
 
 void
-portd_reconfig_loopback_ipaddr(struct port *port,
-                           struct ovsrec_port *port_row)
+portd_reconfig_loopback_ipaddr(struct ovsrec_port *port_row)
 {
-    char cmd[MAX_LOOPBACK_CMD_LENGTH] = {0};
-    if (port->ip6_address){
-       if (port_row->ip6_address){
-          if (strcmp(port->ip6_address, port_row->ip6_address) == 0) {
-             snprintf(cmd, MAX_LOOPBACK_CMD_LENGTH, "/sbin/ip -6 address add %s dev lo:%s",
-                     port->ip6_address, port->name+2);
-          }else {
-             snprintf(cmd, MAX_LOOPBACK_CMD_LENGTH, "/sbin/ip addr del %s dev lo:%s",
-                     port->ip6_address, port->name+2);
-          }
-       }else{
-          snprintf(cmd, MAX_LOOPBACK_CMD_LENGTH, "/sbin/ip addr del %s dev lo:%s",
-                  port->ip6_address, port->name+2);
-       }
-       if (system(cmd) != 0){
-           VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
-                    cmd, strerror(errno));
-       }
+    struct vrf *vrf = get_vrf_for_port(port_row->name);
+    if (portd_if_nametoindex(vrf, port_row->name))
+    {
+        if (port_row->ip4_address != NULL)
+        {
+            nl_add_ip_address(RTM_NEWADDR, port_row->name,
+                              port_row->ip4_address, AF_INET, false);
+            log_event("IP_UPDATE", EV_KV("interface",
+                      "%s", port_row->name),
+                      EV_KV("value", "%s", port_row->ip4_address));
+        }
+        if (port_row->ip6_address != NULL)
+        {
+            nl_add_ip_address(RTM_NEWADDR, port_row->name,
+                              port_row->ip6_address, AF_INET6, false);
+            log_event("IP_UPDATE", EV_KV("interface",
+                      "%s", port_row->name),
+                      EV_KV("value", "%s", port_row->ip6_address));
+        }
     }
-   portd_reconfig_ipaddr(port, port_row);
-   portd_reconfigure_loopback_interface(port_row);
 }
 
 void

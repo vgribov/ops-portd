@@ -122,7 +122,7 @@ portd_config_local_proxy_arp(struct port *port, char *str, int enable)
 
 /* write to /proc entries to enable/disable Linux ip forwarding(routing) */
 void
-portd_config_iprouting(int enable)
+portd_config_iprouting(const char *vrf_name, int enable)
 {
     int fd = -1, nbytes = 0;
     char buf[4];
@@ -131,27 +131,43 @@ portd_config_iprouting(int enable)
     const char *icmp_bcast = "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts";
     const char *source_route = "/proc/sys/net/ipv4/conf/all/accept_source_route";
 
+    if (!vrf_name)
+    {
+        VLOG_ERR("Error: VRF name recieved is NULL");
+        return;
+    }
+
+    if (strncmp(vrf_name, DEFAULT_VRF_NAME, strlen(DEFAULT_VRF_NAME)) != 0)
+    {
+        if(vrf_setns_with_name(idl, vrf_name))
+        {
+            VLOG_ERR("Unable to set %s vrf's namespace, errno %d",
+                      vrf_name, errno);
+            return;
+        }
+    }
+
     nbytes = snprintf(buf, 2, "%d", enable);
     if ((fd = open(ipv4_path, O_WRONLY)) == -1) {
         VLOG_ERR("Unable to open %s (%s)", ipv4_path, strerror(errno));
-        return;
+        goto cleanup;
     }
     if (write(fd, buf, nbytes) == -1) {
         VLOG_ERR("Unable to write to %s (%s)", ipv4_path, strerror(errno));
         close(fd);
-        return;
+        goto cleanup;
     }
     close(fd);
     VLOG_DBG("%s ipv4 forwarding", (enable == 1 ? "Enabled" : "Disabled"));
 
     if ((fd = open(ipv6_path, O_WRONLY)) == -1) {
         VLOG_ERR("Unable to open %s (%s)", ipv6_path, strerror(errno));
-        return;
+        goto cleanup;
     }
     if (write(fd, buf, nbytes) == -1) {
         VLOG_ERR("Unable to write to %s (%s)", ipv6_path, strerror(errno));
         close(fd);
-        return;
+        goto cleanup;
     }
     close(fd);
     VLOG_DBG("%s ipv6 forwarding", (enable == 1 ? "Enabled" : "Disabled"));
@@ -163,12 +179,12 @@ portd_config_iprouting(int enable)
     nbytes = snprintf(buf, 2, "%d", !enable);
     if ((fd = open(icmp_bcast, O_WRONLY)) == -1) {
         VLOG_ERR("Unable to open %s (%s)", icmp_bcast, strerror(errno));
-        return;
+        goto cleanup;
     }
     if (write(fd, buf, nbytes) == -1) {
         VLOG_ERR("Unable to write to %s (%s)", icmp_bcast, strerror(errno));
         close(fd);
-        return;
+        goto cleanup;
     }
     close(fd);
 
@@ -179,15 +195,27 @@ portd_config_iprouting(int enable)
     nbytes = snprintf(buf, 2, "%d", enable);
     if ((fd = open(source_route, O_WRONLY)) == -1) {
         VLOG_ERR("Unable to open %s (%s)", source_route, strerror(errno));
-        return;
+        goto cleanup;
     }
     if (write(fd, buf, nbytes) == -1) {
         VLOG_ERR("Unable to write to %s (%s)", source_route, strerror(errno));
         close(fd);
-        return;
+        goto cleanup;
     }
     close(fd);
     VLOG_DBG("%s ipv4 source route", (enable == 1 ? "Enabled" : "Disabled"));
+
+cleanup:
+    if (strncmp(vrf_name, DEFAULT_VRF_NAME, strlen(DEFAULT_VRF_NAME)) != 0)
+    {
+        if (vrf_setns_with_name(idl, DEFAULT_VRF_NAME))
+        {
+            VLOG_ERR("Unable to set %s vrf's old namespace, errno %d",
+                      vrf_name, errno);
+            return;
+        }
+    }
+    return;
 }
 
 /* write to /proc entries to enable/disable configuration on a port */
@@ -576,11 +604,7 @@ nl_add_ip_address(int cmd, const char *port_name, char *ip_address,
     req.n.nlmsg_type = cmd;
 
     req.ifa.ifa_family = family;
-    #ifdef VRF_ENABLE
     req.ifa.ifa_index = portd_if_nametoindex(vrf, port_name);
-    #else
-    req.ifa.ifa_index = if_nametoindex(port_name);
-    #endif
 
     if (req.ifa.ifa_index == 0) {
         VLOG_ERR("Unable to get ifindex for port '%s'", port_name);
@@ -649,6 +673,7 @@ portd_add_vlan_interface(const char *interface_name,
                          const unsigned short vlan_tag)
 {
     int ifindex;
+    int i;
     struct vrf *vrf = get_vrf_for_port(vlan_interface_name);
 
     struct {
@@ -666,11 +691,7 @@ portd_add_vlan_interface(const char *interface_name,
     req.n.nlmsg_flags   = NLM_F_REQUEST | NLM_F_CREATE;
 
     req.i.ifi_family    = AF_UNSPEC;
-    #ifdef VRF_ENABLE
     ifindex             = portd_if_nametoindex(vrf, interface_name);
-    #else
-    int i;
-    ifindex             = if_nametoindex(interface_name);
 
     /*
      * Prior to creation of vlan interfaces we need the DEFAULT_BRIDGE_NAME
@@ -680,9 +701,8 @@ portd_add_vlan_interface(const char *interface_name,
      */
     for (i = 0; (ifindex == 0 && i<BRIDGE_INT_MAX_RETRY); i++) {
         sleep(1);
-        ifindex = if_nametoindex(interface_name);
+        ifindex = portd_if_nametoindex(vrf, interface_name);
     }
-    #endif
 
     if (ifindex == 0) {
         VLOG_ERR("Unable to get ifindex for interface: %s", interface_name);
@@ -744,11 +764,7 @@ portd_del_vlan_interface(const char *vlan_interface_name)
     req.n.nlmsg_flags   = NLM_F_REQUEST;
 
     req.i.ifi_family    = AF_UNSPEC;
-    #ifdef VRF_ENABLE
     req.i.ifi_index     = portd_if_nametoindex(vrf, vlan_interface_name);
-    #else
-    req.i.ifi_index     = if_nametoindex(vlan_interface_name);
-    #endif
 
     if (req.i.ifi_index == 0) {
         VLOG_ERR("Unable to get ifindex for interface: %s", vlan_interface_name);
@@ -764,8 +780,6 @@ portd_del_vlan_interface(const char *vlan_interface_name)
 
 struct vrf* get_vrf_for_port(const char *port_name)
 {
-
-#ifdef VRF_ENABLE
   struct vrf *vrf = NULL;
   struct port *port = NULL;
 
@@ -777,7 +791,6 @@ struct vrf* get_vrf_for_port(const char *port_name)
         }
      }
   }
-#endif
   return NULL;
 }
 
