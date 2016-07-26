@@ -46,7 +46,7 @@ def test_portd_ct_admin_state(topology, step):
     sw1("interface 1")
     sw1("ip address 10.0.10.1/24")
     sw1("ipv6 address 2000::1/120")
-    sw1("exit")
+    sw1("end")
     # Verify the port and interface is created with same name for L3 port
     step('2-Verify port and interface is created with same name for L3 port')
     cmd = "get interface {first_interface} name".format(**locals())
@@ -69,9 +69,10 @@ def test_portd_ct_admin_state(topology, step):
     output = sw1(cmd, shell='vsctl')
     assert port_down in output
     step('5-Verify port is up on no shut and goes down when port is disabled')
+    sw1("configure terminal")
     sw1("interface 1")
     sw1("no shutdown")
-    sw1("exit")
+    sw1("end")
     cmd = "get port {first_interface} hw_config".format(**locals())
     output = sw1(cmd, shell='vsctl')
     assert port_up in output
@@ -86,9 +87,10 @@ def test_portd_ct_admin_state(topology, step):
     assert port_down in output
     step('6-Verify port hw_config is set to false when interface '
          'user_config is down for L3 and VLAN interfaces')
+    sw1("configure terminal")
     sw1("interface 1")
     sw1("no shutdown")
-    sw1("exit")
+    sw1("end")
     cmd = "get port {first_interface} hw_config".format(**locals())
     output = sw1(cmd, shell='vsctl')
     assert port_up in output
