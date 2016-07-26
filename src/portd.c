@@ -2937,6 +2937,8 @@ portd_vrf_add(const struct ovsrec_vrf *vrf_row)
 
     vrf->name = xstrdup(vrf_row->name);
     vrf->cfg = vrf_row;
+    vrf->table_id = *vrf_row->table_id;
+
     if (strcmp(vrf->name, DEFAULT_VRF_NAME) == 0) {
         vrf->nl_sock = nl_sock;
     }
@@ -2945,7 +2947,6 @@ portd_vrf_add(const struct ovsrec_vrf *vrf_row)
          portd_vrf_netlink_socket_open(vrf);
     }
 
-    vrf->table_id = *vrf_row->table_id;
     portd_config_iprouting(PORTD_ENABLE_ROUTING);
     hmap_init(&vrf->ports);
     hmap_insert(&all_vrfs, &vrf->node, hash_string(vrf->name, 0));
