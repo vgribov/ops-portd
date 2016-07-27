@@ -3363,7 +3363,7 @@ portd_register_event_log(struct ovsrec_port *port_row,
      }else if (strcmp(port->type,
          OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0) {
          if (ipv6_add == true){
-              log_event("SUBINTERFACE_IP_UPDATE", EV_KV("interface",
+              log_event("SUBINTERFACE_IPV6_UPDATE", EV_KV("interface",
                         "%s", port_row->name),
                         EV_KV("value", "%s",
                         port_row->ip6_address));
