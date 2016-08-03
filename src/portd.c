@@ -227,7 +227,8 @@ static void portd_handle_port_config(const struct ovsrec_port *row,
 static void portd_update_interface_lag_eligibility(struct iface_data *idp);
 
 int
-portd_reconfig_ns_loopback(struct ovsrec_port *port_row, bool create_flag);
+portd_reconfig_ns_loopback(struct port *port,
+                           struct ovsrec_port *port_row, bool create_flag);
 
 void
 portd_reconfig_loopback_ipaddr(struct ovsrec_port *port_row);
@@ -2028,8 +2029,9 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                 log_event("SUBINTERFACE_CREATE", EV_KV("interface", "%s", port_row->name));
             } else if (portd_interface_type_loopback_check(port_row,
                        port_row->name)) {
-                portd_reconfig_ns_loopback(port_row, (!strncmp(vrf->name, DEFAULT_VRF_NAME,
-                                                      strlen(DEFAULT_VRF_NAME))));
+                portd_reconfig_ns_loopback(port, port_row,
+                                           (!strncmp(vrf->name, DEFAULT_VRF_NAME,
+                                           strlen(DEFAULT_VRF_NAME))));
                 port->type = xstrdup(OVSREC_INTERFACE_TYPE_LOOPBACK);
                 lpbk_count++;
                 log_event("LOOPBACK_CREATE", EV_KV("interface", "%s", port_row->name));
@@ -2078,9 +2080,9 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
         } else if (port) {
             if (OVSREC_IDL_IS_ROW_MODIFIED(port_row, idl_seqno)) {
                 if ((NULL != port->type) &&
-                        (strcmp(port->type,
-                                OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
-                    portd_reconfig_ns_loopback(port_row, false);
+                    (strcmp(port->type,
+                     OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
+                    portd_reconfig_ns_loopback(port, port_row, false);
                     portd_register_event_log(port_row, port);
                     continue;
                 }
@@ -2175,11 +2177,6 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
                         }
                    }
                 }
-            }
-            if((NULL != port->type) &&
-                    (strcmp(port->type,
-                            OVSREC_INTERFACE_TYPE_LOOPBACK) == 0)) {
-               portd_reconfig_ns_loopback(port_row, false);
             }
         }
     }
@@ -3266,7 +3263,8 @@ bool portd_add_interface_netlink(struct ovsrec_port *port_row,
 }
 
 int
-portd_reconfig_ns_loopback(struct ovsrec_port *port_row, bool create_flag)
+portd_reconfig_ns_loopback(struct port *port,
+                           struct ovsrec_port *port_row, bool create_flag)
 {
     struct vrf *vrf = get_vrf_for_port(port_row->name);
 
@@ -3294,33 +3292,12 @@ portd_reconfig_ns_loopback(struct ovsrec_port *port_row, bool create_flag)
         }
     }
 
-    portd_reconfig_loopback_ipaddr(port_row);
-    return EXIT_SUCCESS;
-}
-
-void
-portd_reconfig_loopback_ipaddr(struct ovsrec_port *port_row)
-{
-    struct vrf *vrf = get_vrf_for_port(port_row->name);
     if (portd_if_nametoindex(vrf, port_row->name))
     {
-        if (port_row->ip4_address != NULL)
-        {
-            nl_add_ip_address(RTM_NEWADDR, port_row->name,
-                              port_row->ip4_address, AF_INET, false);
-            log_event("IP_UPDATE", EV_KV("interface",
-                      "%s", port_row->name),
-                      EV_KV("value", "%s", port_row->ip4_address));
-        }
-        if (port_row->ip6_address != NULL)
-        {
-            nl_add_ip_address(RTM_NEWADDR, port_row->name,
-                              port_row->ip6_address, AF_INET6, false);
-            log_event("IP_UPDATE", EV_KV("interface",
-                      "%s", port_row->name),
-                      EV_KV("value", "%s", port_row->ip6_address));
-        }
+        portd_reconfig_ipaddr(port, port_row);
     }
+
+    return EXIT_SUCCESS;
 }
 
 void

@@ -272,6 +272,17 @@ def portd_loopback_vrf_functionality_tc(sw1, step):
     # Get the Ifindex of the interface.
     Ifindex_in_swns = get_ifindex(sw1, loopback_interface_name, "vrf_default")
 
+    # Delete the ip address and verify.
+    sw1("config terminal")
+    sw1("interface loopback 3")
+    sw1("no ip add 20.0.0.2/24")
+    sw1("no ipv6 address 1000::1/120")
+    sw1("end")
+
+    output = sw1("ip netns exec swns ip addr show loopback3", shell='bash')
+    assert 'inet 20.0.0.2/24' not in output
+    assert 'inet6 1000::1/120' not in output
+
     step("Move the interface to VRF red and configure IP")
     sw1("config terminal")
     sw1("interface loopback 3")
@@ -291,6 +302,17 @@ def portd_loopback_vrf_functionality_tc(sw1, step):
 
     Ifindex_in_vrf_red = get_ifindex(sw1, loopback_interface_name, "red")
     assert (Ifindex_in_swns == Ifindex_in_vrf_red)
+
+    # Delete the ip address and verify.
+    sw1("config terminal")
+    sw1("interface loopback 3")
+    sw1("no ip add 20.0.0.2/24")
+    sw1("no ipv6 address 1000::1/120")
+    sw1("end")
+
+    output = sw1("ip netns exec "+VRF_RED_ID+" ip addr show loopback3", shell='bash')
+    assert 'inet 20.0.0.2/24' not in output
+    assert 'inet6 1000::1/120' not in output
 
     step("Move the interface to VRF blue ")
     move_interface_to_vrf(sw1, loopback_interface_name, "blue")
