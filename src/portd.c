@@ -2018,7 +2018,8 @@ portd_reconfig_ports(struct vrf *vrf, const struct shash *wanted_ports)
 
                 portd_add_vlan_interface(DEFAULT_BRIDGE_NAME, port_row->name,
                                          ops_port_get_tag(port->cfg));
-                portd_interface_up_down(port_row->name, "up");
+                portd_interface_up_down(port_row->name,
+                                        port_row->admin ? port_row->admin: "down");
 
                 port->type = xstrdup(OVSREC_INTERFACE_TYPE_INTERNAL);
             } else if (portd_interface_type_subinterface_check(port_row,
