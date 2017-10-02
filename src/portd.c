@@ -759,7 +759,6 @@ portd_netlink_socket_open(char *vrf_ns_name, int *sock, bool is_init_sock)
             log_event("PORT_SOCKET_BIND_FAIL",
                           EV_KV("error", "%s", strerror(errno)));
            goto label;
-           return;
        }
     }
     VLOG_DBG("Netlink socket created. fd = %d for ns (%s)", *sock, vrf_ns_name);
