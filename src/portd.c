@@ -45,6 +45,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <dynamic-string.h>
+#include <inttypes.h>
 
 /* OVSDB Includes */
 #include "config.h"
@@ -2769,7 +2770,7 @@ portd_vlan_config_on_init(void)
              * 1. Port has no internal VLAN id
              * 2. Port has a VLAN id which is different */
             if (vlan_id == 0 || int_vlan_row->id != vlan_id) {
-                VLOG_DBG("Deleting the internal VLAN : %ld", int_vlan_row->id);
+                VLOG_DBG("Deleting the internal VLAN : %" PRIi64, int_vlan_row->id);
                 portd_del_internal_vlan(int_vlan_row->id);
             }
             smap_destroy(&hw_cfg_smap);
